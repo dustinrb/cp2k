@@ -31,6 +31,7 @@ MODULE force_env_types
                                               cp_fm_type
 
    USE dbcsr_api,                       ONLY: dbcsr_p_type
+   USE cp_dbcsr_operations,             ONLY: copy_dbcsr_to_fm
    USE eip_environment_types,           ONLY: eip_env_get,&
                                               eip_env_release,&
                                               eip_environment_type

@@ -29,8 +29,9 @@ MODULE libcp2k
    USE cp_fm_types,                     ONLY: cp_fm_get_element
    USE f77_interface,                   ONLY: &
         calc_energy_force, create_force_env, destroy_force_env, f_env_add_defaults, &
-        f_env_rm_defaults, f_env_type, finalize_cp2k, get_cell, get_energy, get_force, get_natom, &
-        get_nparticle, get_pos, get_qmmm_cell, get_result_r1, init_cp2k, set_cell, set_pos, set_vel
+        f_env_rm_defaults, f_env_type, finalize_cp2k, get_cell, get_mats, get_energy, &
+        get_force, get_natom, get_nparticle, get_pos, get_qmmm_cell, get_result_r1, &
+        init_cp2k, set_cell, set_pos, set_vel
    USE force_env_types,                 ONLY: force_env_get,&
                                               use_qs_force
    USE input_cp2k,                      ONLY: create_cp2k_root_section

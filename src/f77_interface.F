@@ -1341,8 +1341,6 @@ CONTAINS
       REAL(kind=dp), DIMENSION(nao,nao)               :: fock, overlap, Vxc
       INTEGER, INTENT(out)                            :: ierr
 
-      CHARACTER(len=*), PARAMETER :: routineN = 'get_mats', routineP = moduleN//':'//routineN
-
       TYPE(f_env_type), POINTER                       :: f_env
 
       NULLIFY(f_env)
