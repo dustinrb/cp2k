@@ -1,6 +1,6 @@
 !--------------------------------------------------------------------------------------------------!
 !   CP2K: A general program to perform molecular dynamics simulations                              !
-!   Copyright 2000-2023 CP2K developers group <https://cp2k.org>                                   !
+!   Copyright 2000-2024 CP2K developers group <https://cp2k.org>                                   !
 !                                                                                                  !
 !   SPDX-License-Identifier: GPL-2.0-or-later                                                      !
 !--------------------------------------------------------------------------------------------------!
@@ -17,6 +17,7 @@ MODULE mp2_cphf
                                               get_admm_env
    USE atomic_kind_types,               ONLY: atomic_kind_type
    USE cell_types,                      ONLY: cell_type
+   USE core_ae,                         ONLY: build_core_ae
    USE core_ppl,                        ONLY: build_core_ppl
    USE core_ppnl,                       ONLY: build_core_ppnl
    USE cp_blacs_env,                    ONLY: cp_blacs_env_type
@@ -85,14 +86,9 @@ MODULE mp2_cphf
                                               pw_zero
    USE pw_poisson_methods,              ONLY: pw_poisson_solve
    USE pw_poisson_types,                ONLY: pw_poisson_type
-   USE pw_pool_types,                   ONLY: pw_pool_create_pw,&
-                                              pw_pool_give_back_pw,&
-                                              pw_pool_type
-   USE pw_types,                        ONLY: COMPLEXDATA1D,&
-                                              REALDATA3D,&
-                                              REALSPACE,&
-                                              RECIPROCALSPACE,&
-                                              pw_type
+   USE pw_pool_types,                   ONLY: pw_pool_type
+   USE pw_types,                        ONLY: pw_c1d_gs_type,&
+                                              pw_r3d_rs_type
    USE qs_2nd_kernel_ao,                ONLY: apply_2nd_order_kernel
    USE qs_density_matrices,             ONLY: calculate_whz_matrix
    USE qs_dispersion_pairpot,           ONLY: calculate_dispersion_pairpot
@@ -1307,8 +1303,9 @@ CONTAINS
       CHARACTER(LEN=*), PARAMETER                        :: routineN = 'update_mp2_forces'
 
       INTEGER                                            :: alpha, beta, handle, idir, iounit, &
-                                                            ispin, nocc, nspins
+                                                            ispin, nimages, nocc, nspins
       INTEGER, DIMENSION(3)                              :: comp
+      INTEGER, DIMENSION(:, :, :), POINTER               :: cell_to_index
       LOGICAL                                            :: do_exx, do_hfx, use_virial
       REAL(KIND=dp)                                      :: e_dummy, e_hartree, e_xc, ehartree, exc
       REAL(KIND=dp), DIMENSION(3)                        :: deb
@@ -1329,18 +1326,19 @@ CONTAINS
       TYPE(mo_set_type), DIMENSION(:), POINTER           :: mos
       TYPE(mp_para_env_type), POINTER                    :: para_env
       TYPE(neighbor_list_set_p_type), DIMENSION(:), &
-         POINTER                                         :: sab_orb, sac_ppl, sap_ppnl
+         POINTER                                         :: sab_orb, sac_ae, sac_ppl, sap_ppnl
       TYPE(particle_type), DIMENSION(:), POINTER         :: particle_set
+      TYPE(pw_c1d_gs_type)                               :: pot_g, rho_tot_g, temp_pw_g
+      TYPE(pw_c1d_gs_type), ALLOCATABLE, DIMENSION(:)    :: dvg
+      TYPE(pw_c1d_gs_type), DIMENSION(:), POINTER        :: rho_g, rho_mp2_g
+      TYPE(pw_c1d_gs_type), POINTER                      :: rho_core
       TYPE(pw_env_type), POINTER                         :: pw_env
       TYPE(pw_poisson_type), POINTER                     :: poisson_env
       TYPE(pw_pool_type), POINTER                        :: auxbas_pw_pool
-      TYPE(pw_type)                                      :: pot_g, pot_r, rho_tot_g, temp_pw_g, &
-                                                            vh_rspace, vhxc_rspace
-      TYPE(pw_type), ALLOCATABLE, DIMENSION(:)           :: dvg
-      TYPE(pw_type), DIMENSION(:), POINTER               :: rho_g, rho_mp2_g, rho_mp2_r, &
-                                                            rho_mp2_r_aux, rho_r, tau_mp2_r, &
-                                                            vadmm_rspace, vtau_rspace, vxc_rspace
-      TYPE(pw_type), POINTER                             :: rho_core
+      TYPE(pw_r3d_rs_type)                               :: pot_r, vh_rspace, vhxc_rspace
+      TYPE(pw_r3d_rs_type), DIMENSION(:), POINTER        :: rho_mp2_r, rho_mp2_r_aux, rho_r, &
+                                                            tau_mp2_r, vadmm_rspace, vtau_rspace, &
+                                                            vxc_rspace
       TYPE(qs_dispersion_type), POINTER                  :: dispersion_env
       TYPE(qs_energy_type), POINTER                      :: energy
       TYPE(qs_force_type), DIMENSION(:), POINTER         :: force
@@ -1386,6 +1384,10 @@ CONTAINS
          hfx_section => section_vals_get_subs_vals(qs_env%input, "DFT%XC%WF_CORRELATION%RI_RPA%HF")
          CALL section_vals_get(hfx_section, explicit=do_exx)
       END IF
+
+      nimages = dft_control%nimages
+      CPASSERT(nimages == 1)
+      NULLIFY (cell_to_index)
 
       p_env => qs_env%mp2_env%ri_grad%p_env
 
@@ -1437,7 +1439,27 @@ CONTAINS
       ! Add pseudo potential terms
       scrm_kp(1:nspins, 1:1) => matrix_ks(1:nspins)
       CALL get_qs_env(qs_env, qs_kind_set=qs_kind_set, particle_set=particle_set, &
-                      atomic_kind_set=atomic_kind_set, sac_ppl=sac_ppl, sap_ppnl=sap_ppnl)
+                      atomic_kind_set=atomic_kind_set, sac_ae=sac_ae, sac_ppl=sac_ppl, sap_ppnl=sap_ppnl)
+      IF (ASSOCIATED(sac_ae)) THEN
+         IF (debug_forces) THEN
+            deb(1:3) = force(1)%all_potential(1:3, 1)
+            IF (use_virial) e_dummy = third_tr(virial%pv_virial)
+         END IF
+         CALL build_core_ae(scrm_kp, rho_ao_kp, force, &
+                            virial, .TRUE., use_virial, 1, &
+                            qs_kind_set, atomic_kind_set, particle_set, sab_orb, sac_ae, &
+                            nimages, cell_to_index)
+         IF (debug_forces) THEN
+            deb(1:3) = force(1)%all_potential(1:3, 1) - deb(1:3)
+            CALL para_env%sum(deb)
+            IF (iounit > 0) WRITE (iounit, "(T3,A,T33,3F16.8)") "DEBUG:: P*dHae     ", deb
+            IF (use_virial) THEN
+               e_dummy = third_tr(virial%pv_virial) - e_dummy
+               CALL para_env%sum(e_dummy)
+               IF (iounit > 0) WRITE (iounit, "(T3,A,T33,F16.8)") "DEBUG VIRIAL:: Hae        ", e_dummy
+            END IF
+         END IF
+      END IF
       IF (ASSOCIATED(sac_ppl)) THEN
          IF (debug_forces) THEN
             deb(1:3) = force(1)%gth_ppl(1:3, 1)
@@ -1506,8 +1528,7 @@ CONTAINS
       CALL get_qs_env(qs_env, pw_env=pw_env)
       CALL pw_env_get(pw_env, auxbas_pw_pool=auxbas_pw_pool, &
                       poisson_env=poisson_env)
-      CALL pw_pool_create_pw(auxbas_pw_pool, vhxc_rspace, &
-                             use_data=REALDATA3D, in_space=REALSPACE)
+      CALL auxbas_pw_pool%create_pw(vhxc_rspace)
       IF (use_virial) h_stress = virial%pv_virial
       IF (debug_forces) THEN
          deb(1:3) = force(1)%rho_elec(1:3, 1)
@@ -1575,13 +1596,13 @@ CONTAINS
          END DO
       END IF
       DO ispin = 1, nspins
-         CALL pw_pool_give_back_pw(auxbas_pw_pool, vxc_rspace(ispin))
+         CALL auxbas_pw_pool%give_back_pw(vxc_rspace(ispin))
          IF (ASSOCIATED(vtau_rspace)) THEN
-            CALL pw_pool_give_back_pw(auxbas_pw_pool, vtau_rspace(ispin))
+            CALL auxbas_pw_pool%give_back_pw(vtau_rspace(ispin))
          END IF
       END DO
       DEALLOCATE (vxc_rspace)
-      CALL pw_pool_give_back_pw(auxbas_pw_pool, vhxc_rspace)
+      CALL auxbas_pw_pool%give_back_pw(vhxc_rspace)
       IF (ASSOCIATED(vtau_rspace)) DEALLOCATE (vtau_rspace)
 
       DO ispin = 1, nspins
@@ -1594,15 +1615,9 @@ CONTAINS
                       poisson_env=poisson_env)
 
       ! get some of the grids ready
-      CALL pw_pool_create_pw(auxbas_pw_pool, pot_r, &
-                             use_data=REALDATA3D, &
-                             in_space=REALSPACE)
-      CALL pw_pool_create_pw(auxbas_pw_pool, pot_g, &
-                             use_data=COMPLEXDATA1D, &
-                             in_space=RECIPROCALSPACE)
-      CALL pw_pool_create_pw(auxbas_pw_pool, rho_tot_g, &
-                             use_data=COMPLEXDATA1D, &
-                             in_space=RECIPROCALSPACE)
+      CALL auxbas_pw_pool%create_pw(pot_r)
+      CALL auxbas_pw_pool%create_pw(pot_g)
+      CALL auxbas_pw_pool%create_pw(rho_tot_g)
 
       CALL pw_zero(rho_tot_g)
 
@@ -1614,14 +1629,13 @@ CONTAINS
       IF (use_virial) THEN
          ALLOCATE (dvg(3))
          DO idir = 1, 3
-            CALL pw_pool_create_pw(auxbas_pw_pool, dvg(idir), &
-                                   use_data=COMPLEXDATA1D, &
-                                   in_space=RECIPROCALSPACE)
+            CALL auxbas_pw_pool%create_pw(dvg(idir))
          END DO
+         CALL pw_poisson_solve(poisson_env, rho_tot_g, vhartree=pot_g, dvhartree=dvg)
+      ELSE
+         CALL pw_poisson_solve(poisson_env, rho_tot_g, vhartree=pot_g)
       END IF
 
-      ! calculate the MP2 potential
-      CALL pw_poisson_solve(poisson_env, rho_tot_g, vhartree=pot_g, dvhartree=dvg)
       CALL pw_transfer(pot_g, pot_r)
       CALL pw_scale(pot_r, pot_r%pw_grid%dvol)
       CALL pw_axpy(pot_r, vh_rspace)
@@ -1638,14 +1652,12 @@ CONTAINS
             IF (iounit > 0) WRITE (iounit, "(T3,A,T33,F16.8)") "DEBUG VIRIAL:: core      ", e_dummy
          END IF
       END IF
-      CALL pw_pool_give_back_pw(auxbas_pw_pool, vh_rspace)
+      CALL auxbas_pw_pool%give_back_pw(vh_rspace)
 
       IF (use_virial) THEN
          ! update virial if necessary with the volume term
          ! first create pw auxiliary stuff
-         CALL pw_pool_create_pw(auxbas_pw_pool, temp_pw_g, &
-                                use_data=COMPLEXDATA1D, &
-                                in_space=RECIPROCALSPACE)
+         CALL auxbas_pw_pool%create_pw(temp_pw_g)
 
          ! make a copy of the MP2 density in G space
          CALL pw_copy(rho_tot_g, temp_pw_g)
@@ -1676,9 +1688,9 @@ CONTAINS
          IF (debug_forces .AND. iounit > 0) WRITE (iounit, "(T3,A,T33,F16.8)") "DEBUG VIRIAL:: Hartree  ", third_tr(h_stress)
 
          ! free stuff
-         CALL pw_pool_give_back_pw(auxbas_pw_pool, temp_pw_g)
+         CALL auxbas_pw_pool%give_back_pw(temp_pw_g)
          DO idir = 1, 3
-            CALL pw_pool_give_back_pw(auxbas_pw_pool, dvg(idir))
+            CALL auxbas_pw_pool%give_back_pw(dvg(idir))
          END DO
          DEALLOCATE (dvg)
 
@@ -1877,7 +1889,7 @@ CONTAINS
                                              calculate_forces=.TRUE., basis_type="AUX_FIT", &
                                              task_list_external=task_list_aux_fit, pmat=rho_ao_aux(ispin))
                   END IF
-                  CALL pw_pool_give_back_pw(auxbas_pw_pool, vadmm_rspace(ispin))
+                  CALL auxbas_pw_pool%give_back_pw(vadmm_rspace(ispin))
                END DO
                IF (use_virial) virial%pv_ehartree = virial%pv_ehartree + (virial%pv_virial - h_stress)
                DEALLOCATE (vadmm_rspace)
@@ -1965,9 +1977,9 @@ CONTAINS
          END IF
       END IF
 
-      CALL pw_pool_give_back_pw(auxbas_pw_pool, pot_r)
-      CALL pw_pool_give_back_pw(auxbas_pw_pool, pot_g)
-      CALL pw_pool_give_back_pw(auxbas_pw_pool, rho_tot_g)
+      CALL auxbas_pw_pool%give_back_pw(pot_r)
+      CALL auxbas_pw_pool%give_back_pw(pot_g)
+      CALL auxbas_pw_pool%give_back_pw(rho_tot_g)
 
       ! Release linres stuff
       CALL p_env_release(p_env)

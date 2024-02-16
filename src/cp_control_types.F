@@ -1,6 +1,6 @@
 !--------------------------------------------------------------------------------------------------!
 !   CP2K: A general program to perform molecular dynamics simulations                              !
-!   Copyright 2000-2023 CP2K developers group <https://cp2k.org>                                   !
+!   Copyright 2000-2024 CP2K developers group <https://cp2k.org>                                   !
 !                                                                                                  !
 !   SPDX-License-Identifier: GPL-2.0-or-later                                                      !
 !--------------------------------------------------------------------------------------------------!
@@ -283,6 +283,7 @@ MODULE cp_control_types
 
    TYPE admm_control_type
       REAL(KIND=dp)                        :: eps_filter = 0.0_dp
+      INTEGER                              :: admm_type = 0
       INTEGER                              :: purification_method = 0
       INTEGER                              :: method = 0
       LOGICAL                              :: charge_constrain = .FALSE.

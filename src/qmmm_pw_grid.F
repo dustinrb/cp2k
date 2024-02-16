@@ -1,6 +1,6 @@
 !--------------------------------------------------------------------------------------------------!
 !   CP2K: A general program to perform molecular dynamics simulations                              !
-!   Copyright 2000-2023 CP2K developers group <https://cp2k.org>                                   !
+!   Copyright 2000-2024 CP2K developers group <https://cp2k.org>                                   !
 !                                                                                                  !
 !   SPDX-License-Identifier: GPL-2.0-or-later                                                      !
 !--------------------------------------------------------------------------------------------------!
@@ -40,8 +40,8 @@ MODULE qmmm_pw_grid
 CONTAINS
 
 ! **************************************************************************************************
-!> \brief Initialize the qmmm pool of pw_type.
-!>      Then Main difference w.r.t. QS pw_type pools is that this pool
+!> \brief Initialize the qmmm pool of pw_r3d_rs_type.
+!>      Then Main difference w.r.t. QS pw_r3d_rs_type pools is that this pool
 !>      has [0,L] as boundaries.
 !> \param qmmm_env ...
 !> \param pw_env ...

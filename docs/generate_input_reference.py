@@ -2,12 +2,15 @@
 
 # author: Ole Schuett
 
-from typing import Dict, Tuple, List, Optional
+from typing import Dict, Tuple, List, Set, Optional
 import lxml.etree as ET
 import lxml
 from pathlib import Path
 import re
 import sys
+from collections import defaultdict
+from functools import cache
+
 
 SectionPath = Tuple[str, ...]
 
@@ -138,7 +141,8 @@ def process_section(
         for keyword in keywords:
             keyword_name = get_name(keyword)
             keyword_xref = f"{section_xref}.{sanitize_name(keyword_name)}"
-            output += [f"* [{escape_markdown(keyword_name)}](#{keyword_xref})"]
+            em = "**" if lookup_mentions(keyword_xref) else ""  # emphasize if mentioned
+            output += [f"* {em}[{escape_markdown(keyword_name)}](#{keyword_xref}){em}"]
         output += [""]
         # Render keywords
         output += ["## Keyword descriptions", ""]
@@ -266,9 +270,12 @@ def render_keyword(
         keyword_names = [get_text(name) for name in keyword.findall("NAME")]
     assert keyword_names
     canonical_name = sanitize_name(keyword_names[0])
+    keyword_xref = f"{section_xref}.{canonical_name}" if section_xref else None
+    mentions = lookup_mentions(keyword_xref)
 
     # Find more keyword fields.
     default_value = get_text(keyword.find("DEFAULT_VALUE"))
+    default_unit = get_text(keyword.find("DEFAULT_UNIT"))
     usage = get_text(keyword.find("USAGE"))
     description = get_text(keyword.find("DESCRIPTION"))
     deprecation_notice = get_text(keyword.find("DEPRECATION_NOTICE"))
@@ -306,8 +313,9 @@ def render_keyword(
     else:
         output += [":noindex:"]
     output += [f":type: '{data_type}{n_var_brackets}'"]
-    if default_value:
-        output += [f":value: '{default_value}'"]
+    if default_value or default_unit:
+        default_unit_bracketed = f"[{default_unit}]" if default_unit else ""
+        output += [f":value: '{default_value} {default_unit_bracketed}'"]
     output += [""]
     if repeats:
         output += ["**Keyword can be repeated.**", ""]
@@ -328,18 +336,40 @@ def render_keyword(
     if references:
         citations = ", ".join([f"{{ref}}`{r}`" for r in references])
         output += [f"**References:** {citations}", ""]
+    if mentions:
+        mentions_list = ", ".join([f"⭐[](project:{m})" for m in mentions])
+        output += [f"**Mentions:** {mentions_list}", ""]
     output += [escape_markdown(description)]
     if github:
         output += [github_link(location)]
     output += ["", "```", ""]  # Close py:data directive.
 
     if deprecation_notice:
-        output += ["```{warning}", "The keyword"]
-        output += [f"[{canonical_name}](#{section_xref}.{canonical_name})"]
-        output += [" is deprecated and may be removed in a future version.", ""]
+        output += ["```{warning}", f"The keyword [{canonical_name}](#{keyword_xref})"]
+        output += ["is deprecated and may be removed in a future version.", ""]
         output += [escape_markdown(deprecation_notice), "", "```", ""]
 
     return output
+
+
+# ======================================================================================
+@cache
+def find_all_mentions() -> Dict[str, Set[Path]]:
+    root_dir = Path(__file__).resolve().parent
+    mentions = defaultdict(set)
+    for fn in (root_dir / "methods").glob("**/*.md"):
+        for xref in re.findall(r"\(#(CP2K_INPUT\..*)\)", fn.read_text()):
+            mentions[xref].add(fn.relative_to(root_dir))
+    return mentions
+
+
+# ======================================================================================
+def lookup_mentions(xref: Optional[str]) -> List[str]:
+    if not xref:
+        return []
+    mentions = find_all_mentions()
+    n = xref.count(".") - 1
+    return [("../" * n) + str(path) for path in sorted(mentions[xref])]
 
 
 # ======================================================================================
@@ -367,7 +397,7 @@ def sanitize_name(name: str) -> str:
 # ======================================================================================
 def escape_markdown(text: str) -> str:
     # Code blocks without a language get mistaken for the end of the py:data directive.
-    text = text.replace(r"\n\n```\n", r"\n\n```none\n")
+    text = text.replace("\n\n```\n", "\n\n```none\n")
 
     # Underscores are very common in our docs. Luckily asterisks also work for emphasis.
     text = text.replace(r"__", r"\_\_")

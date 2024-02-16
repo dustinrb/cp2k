@@ -1,6 +1,6 @@
 /*----------------------------------------------------------------------------*/
 /*  CP2K: A general program to perform molecular dynamics simulations         */
-/*  Copyright 2000-2023 CP2K developers group <https://cp2k.org>              */
+/*  Copyright 2000-2024 CP2K developers group <https://cp2k.org>              */
 /*                                                                            */
 /*  SPDX-License-Identifier: BSD-3-Clause                                     */
 /*----------------------------------------------------------------------------*/
@@ -35,6 +35,11 @@ static grid_library_config config = {
 
 #if !defined(_OPENMP)
 #error "OpenMP is required. Please add -fopenmp to your C compiler flags."
+#endif
+
+#if defined(NDEBUG)
+#error                                                                         \
+    "Please do not build CP2K with NDEBUG. There is no performance advantage and asserts will save your neck."
 #endif
 
 /*******************************************************************************

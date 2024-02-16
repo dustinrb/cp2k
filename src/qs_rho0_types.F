@@ -1,6 +1,6 @@
 !--------------------------------------------------------------------------------------------------!
 !   CP2K: A general program to perform molecular dynamics simulations                              !
-!   Copyright 2000-2023 CP2K developers group <https://cp2k.org>                                   !
+!   Copyright 2000-2024 CP2K developers group <https://cp2k.org>                                   !
 !                                                                                                  !
 !   SPDX-License-Identifier: GPL-2.0-or-later                                                      !
 !--------------------------------------------------------------------------------------------------!
@@ -13,8 +13,8 @@ MODULE qs_rho0_types
                                               pi,&
                                               rootpi
    USE memory_utilities,                ONLY: reallocate
-   USE pw_types,                        ONLY: pw_release,&
-                                              pw_type
+   USE pw_types,                        ONLY: pw_c1d_gs_type,&
+                                              pw_r3d_rs_type
    USE qs_grid_atom,                    ONLY: grid_atom_type
    USE qs_rho_atom_types,               ONLY: rho_atom_coeff
    USE whittaker,                       ONLY: whittaker_c0a,&
@@ -59,8 +59,8 @@ MODULE qs_rho0_types
       REAL(dp), DIMENSION(:), POINTER             :: norm_g0l_h
       INTEGER, DIMENSION(:), POINTER             :: lmax0_kind
       INTEGER                                     :: lmax_0, igrid_zet0_s
-      TYPE(pw_type), POINTER                    :: rho0_s_rs, &
-                                                   rho0_s_gs
+      TYPE(pw_r3d_rs_type), POINTER                    :: rho0_s_rs
+      TYPE(pw_c1d_gs_type), POINTER ::                                                   rho0_s_gs
    END TYPE rho0_mpole_type
 
 ! **************************************************************************************************
@@ -376,12 +376,12 @@ CONTAINS
          END IF
 
          IF (ASSOCIATED(rho0%rho0_s_rs)) THEN
-            CALL pw_release(rho0%rho0_s_rs)
+            CALL rho0%rho0_s_rs%release()
             DEALLOCATE (rho0%rho0_s_rs)
          END IF
 
          IF (ASSOCIATED(rho0%rho0_s_gs)) THEN
-            CALL pw_release(rho0%rho0_s_gs)
+            CALL rho0%rho0_s_gs%release()
             DEALLOCATE (rho0%rho0_s_gs)
 
          END IF
@@ -436,7 +436,8 @@ CONTAINS
       REAL(dp), INTENT(OUT), OPTIONAL                    :: zet0_h
       INTEGER, INTENT(OUT), OPTIONAL                     :: igrid_zet0_s
       REAL(dp), INTENT(OUT), OPTIONAL                    :: rpgf0_h, rpgf0_s, max_rpgf0_s
-      TYPE(pw_type), OPTIONAL, POINTER                   :: rho0_s_rs, rho0_s_gs
+      TYPE(pw_r3d_rs_type), OPTIONAL, POINTER            :: rho0_s_rs
+      TYPE(pw_c1d_gs_type), OPTIONAL, POINTER            :: rho0_s_gs
 
       IF (ASSOCIATED(rho0_mpole)) THEN
 

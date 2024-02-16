@@ -1,6 +1,6 @@
 #!-------------------------------------------------------------------------------------------------!
 #!   CP2K: A general program to perform molecular dynamics simulations                             !
-#!   Copyright 2000-2023 CP2K developers group <https://cp2k.org>                                  !
+#!   Copyright 2000-2024 CP2K developers group <https://cp2k.org>                                  !
 #!                                                                                                 !
 #!   SPDX-License-Identifier: GPL-2.0-or-later                                                     !
 #!-------------------------------------------------------------------------------------------------!
@@ -58,6 +58,24 @@ endif()
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_C_STANDARD 11)
 
+# remove NDEBUG flag
+string(REPLACE "-DNDEBUG" "" CMAKE_C_FLAGS_RELEASE ${CMAKE_C_FLAGS_RELEASE})
+string(REPLACE "-DNDEBUG" "" CMAKE_CXX_FLAGS_RELEASE ${CMAKE_CXX_FLAGS_RELEASE})
+string(REPLACE "-DNDEBUG" "" CMAKE_Fortran_FLAGS_RELEASE
+               ${CMAKE_Fortran_FLAGS_RELEASE})
+string(REPLACE "-DNDEBUG" "" CMAKE_C_FLAGS_RELWITHDEBINFO
+               ${CMAKE_C_FLAGS_RELWITHDEBINFO})
+string(REPLACE "-DNDEBUG" "" CMAKE_CXX_FLAGS_RELWITHDEBINFO
+               ${CMAKE_CXX_FLAGS_RELWITHDEBINFO})
+string(REPLACE "-DNDEBUG" "" CMAKE_Fortran_FLAGS_RELWITHDEBINFO
+               ${CMAKE_Fortran_FLAGS_RELWITHDEBINFO})
+string(REPLACE "-DNDEBUG" "" CMAKE_C_FLAGS_MINSIZEREL
+               ${CMAKE_C_FLAGS_MINSIZEREL})
+string(REPLACE "-DNDEBUG" "" CMAKE_CXX_FLAGS_MINSIZEREL
+               ${CMAKE_CXX_FLAGS_MINSIZEREL})
+string(REPLACE "-DNDEBUG" "" CMAKE_Fortran_FLAGS_MINSIZEREL
+               ${CMAKE_Fortran_FLAGS_MINSIZEREL})
+
 find_package(PkgConfig)
 
 # ##############################################################################
@@ -111,8 +129,13 @@ option(CP2K_USE_STATIC_BLAS "Link against static version of BLAS/LAPACK" OFF)
 option(CP2K_USE_SPLA
        "Use SPLA offloading gemm feature to the GPU if it is beneficial. " OFF)
 option(CP2K_USE_METIS "enable metis library support" OFF)
+option(
+  CP2K_USE_DLAF
+  "Use DLA-Future for Cholesky decompositions and the solution of eigenvalue problems"
+  OFF)
 option(CP2K_USE_LIBXSMM "Use libxsmm for small gemms (supports x86 platforms)"
        OFF)
+# option(CP2K_USE_LIBGRPP "Use libgrpp" OFF)
 option(BUILD_SHARED_LIBS "Build cp2k shared library" ON)
 option(
   CP2K_USE_FFTW3_WITH_MKL
@@ -158,6 +181,10 @@ set(CP2K_BUILD_OPTIONS
 set_property(CACHE CP2K_BUILD_OPTIONS PROPERTY STRINGS
                                                ${CP2K_BUILD_OPTIONS_LIST})
 
+set(CP2K_DATA_DIR
+    "default"
+    CACHE STRING "Set the location for cp2k data")
+
 string(TOUPPER ${CP2K_BUILD_OPTIONS} cp2k_build_options_up)
 
 if(NOT ${cp2k_build_options_up} IN_LIST CP2K_BUILD_OPTIONS_LIST)
@@ -186,6 +213,7 @@ if(${cp2k_build_options_up} STREQUAL "FULL")
   set(CP2K_USE_QUIP ON)
   set(CP2K_USE_PEXSI ON)
   set(CP2K_USE_SUPERLU ON)
+  # set(CP@K_USE_LIBGRPP ON)
 endif()
 
 if(${cp2k_build_options_up} STREQUAL "SERIAL")
@@ -228,6 +256,7 @@ set(CP2K_SUPPORTED_HIP_ARCHITECTURES
     Mi100
     Mi210
     Mi250
+    Mi300
     K20X
     K40
     K80
@@ -287,6 +316,12 @@ cmake_dependent_option(
 cmake_dependent_option(
   CP2K_DBCSR_CPU_ONLY "Use DBCSR compiled without GPU support." OFF
   "(NOT CP2K_USE_ACCEL MATCHES \"NONE\") AND (CP2K_DEBUG_MODE)" OFF)
+
+cmake_dependent_option(
+  CP2K_USE_UNIFIED_MEMORY "Use CPU/GPU unified memory.
+  requires Mi250x or future AMD architectures to be fully functional" OFF
+  "CP2K_USE_ACCEL MATCHES \"HIP\"" OFF)
+
 cmake_dependent_option(DBCSR_USE_OPENMP "Enable openmp support in DBCSR" ON
                        "CP2K_BUILD_DBCSR" OFF)
 # ##############################################################################
@@ -481,6 +516,7 @@ if((CP2K_USE_ACCEL MATCHES CUDA) OR (CP2K_USE_ACCEL MATCHES HIP))
   set(CP2K_GPU_ARCH_NUMBER_Mi100 gfx908)
   set(CP2K_GPU_ARCH_NUMBER_Mi200 gfx90a)
   set(CP2K_GPU_ARCH_NUMBER_Mi250 gfx90a)
+  set(CP2K_GPU_ARCH_NUMBER_Mi300 gfx1103)
 endif()
 
 set(CP2K_USE_HIP OFF)
@@ -539,17 +575,33 @@ elseif(CP2K_USE_ACCEL MATCHES "HIP")
 
   set(CMAKE_HIP_ARCHITECTURES gfx801 gfx900 gfx90a)
   if(NOT CMAKE_BUILD_TYPE)
-    set(HIP_RELEASE_OPTIONS "-O3 -g -DNDEBUG --std=c++11")
+    set(HIP_RELEASE_OPTIONS "-O3 --std=c++11")
   elseif(${CMAKE_BUILD_TYPE} STREQUAL "RelWithDebInfo")
-    set(HIP_RELEASE_OPTIONS "-O3 -g -DNDEBUG --std=c++11")
+    set(HIP_RELEASE_OPTIONS "-O2 -g --std=c++11")
   elseif(${CMAKE_BUILD_TYPE} STREQUAL "Release")
-    set(HIP_RELEASE_OPTIONS "-O3 -DNDEBUG --std=c++11")
+    set(HIP_RELEASE_OPTIONS "-O3 --std=c++11")
   elseif(${CMAKE_BUILD_TYPE} STREQUAL "Debug")
     set(HIP_RELEASE_OPTIONS "-O0 -g --std=c++11")
   endif()
 
   set(CMAKE_HIP_ARCGITECTURES "${CP2K_GPU_ARCH_NUMBER_${CP2K_WITH_GPU}}")
   set(CP2K_USE_HIP ON)
+
+  # use hardware atomic operations on Mi250X.
+  if(CMAKE_HIP_ARCGITECTURES MATCHES "gfx90a|gfx1103")
+    set(HIP_RELEASE_OPTIONS "-munsafe-fp-atomics")
+  endif()
+
+  # add the Mi300A parameters when available
+  if(CP2K_USE_UNIFIED_MEMORY)
+    if(CMAKE_HIP_ARCHITECTURES MATCHES "gfx90a")
+      set(CMAKE_HIP_ARCHITECTURES "gfx90a:xnack+")
+    endif()
+
+    if(CMAKE_HIP_ARCHITECTURES MATCHES "gfx1103")
+      set(CMAKE_HIP_ARCHITECTURES "gfx1103:xnack+")
+    endif()
+  endif()
 endif()
 
 # PACKAGE DISCOVERY (compiler configuration can impact package discovery)
@@ -566,6 +618,10 @@ if(CP2K_USE_LIBXC)
   find_package(LibXC 6 REQUIRED EXACT)
 endif()
 
+# uncomment this when libgrpp cmake support is complete
+
+# if (CP2K_USE_LIBGRPP) find_package(libgrpp REQUIRED) endif()
+
 if(CP2K_USE_COSMA)
   find_package(cosma REQUIRED)
 
@@ -580,6 +636,10 @@ endif()
 
 if(CP2K_USE_VORI)
   find_package(LibVORI REQUIRED)
+endif()
+
+if(CP2K_USE_DLAF)
+  find_package(DLAF REQUIRED)
 endif()
 
 # FFTW3
@@ -613,6 +673,7 @@ if(CP2K_USE_FFTW3)
     set(CP2K_USE_FFTW3_ ON)
   else()
     message("-- Using the MKL implementation of FFTW3.")
+    set(CP2K_USE_FFTW3_MKL_ ON)
   endif()
 endif()
 
@@ -714,10 +775,10 @@ if(CP2K_BUILD_DBCSR)
   add_library(DBCSR::dbcsr ALIAS dbcsr)
 endif()
 
+include(GNUInstallDirs)
+
 # subdirectories
 add_subdirectory(src)
-
-include(GNUInstallDirs)
 
 get_target_property(CP2K_LIBS cp2k_link_libs INTERFACE_LINK_LIBRARIES)
 configure_file(cmake/libcp2k.pc.in libcp2k.pc @ONLY)
@@ -861,7 +922,16 @@ endif()
 
 if(CP2K_USE_ELPA)
   message(" - ELPA\n" "   - include directories : ${CP2K_ELPA_INCLUDE_DIRS}\n"
-          "   - libraries           :  ${CP2K_ELPA_LINK_LIBRARIES})\n\n")
+          "   - libraries           :  ${CP2K_ELPA_LINK_LIBRARIES}\n\n")
+endif()
+
+if(CP2K_USE_DLAF)
+  get_target_property(CP2K_DLAF_INCLUDE_DIRS DLAF::DLAF
+                      INTERFACE_INCLUDE_DIRECTORIES)
+  get_target_property(CP2K_DLAF_LINK_LIBRARIES DLAF::DLAF
+                      INTERFACE_LINK_LIBRARIES)
+  message(" - DLAF\n" "   - include directories : ${CP2K_DLAF_INCLUDE_DIRS}\n"
+          "   - libraries           :  ${CP2K_DLAF_LINK_LIBRARIES}\n\n")
 endif()
 
 if(CP2K_USE_SUPERLU)
@@ -903,6 +973,10 @@ endif()
 
 if(NOT CP2K_USE_ELPA)
   message("   - ELPA")
+endif()
+
+if(NOT CP2K_USE_DLAF)
+  message("   - DLAF")
 endif()
 
 if(NOT CP2K_USE_PLUMMED)

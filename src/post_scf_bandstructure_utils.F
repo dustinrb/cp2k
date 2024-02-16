@@ -1,6 +1,6 @@
 !--------------------------------------------------------------------------------------------------!
 !   CP2K: A general program to perform molecular dynamics simulations                              !
-!   Copyright 2000-2023 CP2K developers group <https://cp2k.org>                                   !
+!   Copyright 2000-2024 CP2K developers group <https://cp2k.org>                                   !
 !                                                                                                  !
 !   SPDX-License-Identifier: GPL-2.0-or-later                                                      !
 !--------------------------------------------------------------------------------------------------!
@@ -19,7 +19,8 @@ MODULE post_scf_bandstructure_utils
                                               pbc
    USE cp_blacs_env,                    ONLY: cp_blacs_env_type
    USE cp_cfm_basic_linalg,             ONLY: cp_cfm_cholesky_decompose
-   USE cp_cfm_diag,                     ONLY: cp_cfm_geeig
+   USE cp_cfm_diag,                     ONLY: cp_cfm_geeig,&
+                                              cp_cfm_heevd
    USE cp_cfm_types,                    ONLY: cp_cfm_create,&
                                               cp_cfm_get_info,&
                                               cp_cfm_release,&
@@ -34,7 +35,6 @@ MODULE post_scf_bandstructure_utils
                                               dbcsr_deallocate_matrix_set
    USE cp_files,                        ONLY: close_file,&
                                               open_file
-   USE cp_fm_basic_linalg,              ONLY: cp_fm_scale_and_add
    USE cp_fm_diag,                      ONLY: cp_fm_geeig_canon
    USE cp_fm_struct,                    ONLY: cp_fm_struct_create,&
                                               cp_fm_struct_release,&
@@ -43,6 +43,7 @@ MODULE post_scf_bandstructure_utils
                                               cp_fm_get_diag,&
                                               cp_fm_get_info,&
                                               cp_fm_release,&
+                                              cp_fm_set_all,&
                                               cp_fm_to_fm,&
                                               cp_fm_type
    USE cp_log_handling,                 ONLY: cp_logger_get_default_io_unit
@@ -58,11 +59,11 @@ MODULE post_scf_bandstructure_utils
                                               section_vals_get_subs_vals,&
                                               section_vals_type,&
                                               section_vals_val_get
-   USE kinds,                           ONLY: default_path_length,&
-                                              default_string_length,&
+   USE kinds,                           ONLY: default_string_length,&
                                               dp,&
                                               max_line_length
-   USE kpoint_types,                    ONLY: kpoint_create,&
+   USE kpoint_types,                    ONLY: get_kpoint_info,&
+                                              kpoint_create,&
                                               kpoint_type
    USE machine,                         ONLY: m_walltime
    USE mathconstants,                   ONLY: gaussi,&
@@ -80,23 +81,21 @@ MODULE post_scf_bandstructure_utils
                                               post_scf_bandstructure_type
    USE pw_env_types,                    ONLY: pw_env_get,&
                                               pw_env_type
-   USE pw_pool_types,                   ONLY: pw_pool_create_pw,&
-                                              pw_pool_give_back_pw,&
-                                              pw_pool_type
-   USE pw_types,                        ONLY: COMPLEXDATA1D,&
-                                              REALDATA3D,&
-                                              REALSPACE,&
-                                              RECIPROCALSPACE,&
-                                              pw_type
+   USE pw_pool_types,                   ONLY: pw_pool_type
+   USE pw_types,                        ONLY: pw_c1d_gs_type,&
+                                              pw_r3d_rs_type
    USE qs_collocate_density,            ONLY: calculate_rho_elec
    USE qs_environment_types,            ONLY: get_qs_env,&
                                               qs_environment_type
    USE qs_ks_types,                     ONLY: qs_ks_env_type
    USE qs_mo_types,                     ONLY: get_mo_set,&
                                               mo_set_type
-   USE rpa_gw_im_time_util,             ONLY: get_atom_index_from_basis_function_index
+   USE rpa_gw_im_time_util,             ONLY: compute_weight_re_im,&
+                                              get_atom_index_from_basis_function_index
    USE scf_control_types,               ONLY: scf_control_type
+   USE soc_pseudopotential_methods,     ONLY: remove_soc_outside_energy_window_mo
    USE soc_pseudopotential_utils,       ONLY: add_cfm_submat,&
+                                              cfm_add_on_diag,&
                                               get_cfm_submat
 #include "base/base_uses.f90"
 
@@ -106,7 +105,7 @@ MODULE post_scf_bandstructure_utils
 
    PUBLIC :: create_and_init_bs_env, &
              bandstructure_primitive_cell, bandstructure_primitive_cell_spinor, &
-             dos_pdos_ldos, cfm_ikp_from_fm_Gamma
+             dos_pdos_ldos, cfm_ikp_from_fm_Gamma, get_fname, MIC_contribution_from_ikp
 
    CHARACTER(len=*), PARAMETER, PRIVATE :: moduleN = 'post_scf_bandstructure_utils'
 
@@ -171,7 +170,7 @@ CONTAINS
          DIMENSION(:), POINTER                           :: string_ptr
       CHARACTER(LEN=max_line_length)                     :: error_msg
       INTEGER                                            :: handle, i, ikp
-      TYPE(section_vals_type), POINTER                   :: gw_sec, kp_bs_sec, lvcg_sec, soc_sec
+      TYPE(section_vals_type), POINTER                   :: gw_sec, kp_bs_sec, ldos_sec, soc_sec
 
       CALL timeset(routineN, handle)
 
@@ -190,15 +189,12 @@ CONTAINS
       CALL section_vals_val_get(bs_sec, "DOS%ENERGY_STEP", r_val=bs_env%energy_step_DOS)
       CALL section_vals_val_get(bs_sec, "DOS%BROADENING", r_val=bs_env%broadening_DOS)
 
-      NULLIFY (lvcg_sec)
-      lvcg_sec => section_vals_get_subs_vals(bs_sec, "LOCAL_VBM_CBM_GAP")
-      CALL section_vals_get(lvcg_sec, explicit=bs_env%do_local_vbm_cbm_gap)
+      NULLIFY (ldos_sec)
+      ldos_sec => section_vals_get_subs_vals(bs_sec, "DOS%LDOS")
+      CALL section_vals_get(ldos_sec, explicit=bs_env%do_ldos)
 
-      CALL section_vals_val_get(lvcg_sec, "INTEGRATION", i_val=bs_env%int_ldos_xyz)
-      CALL section_vals_val_get(lvcg_sec, "EPS_LDOS", r_vals=bs_env%eps_ldos)
-      CALL section_vals_val_get(lvcg_sec, "ENERGY_WINDOW", r_vals=bs_env%energy_window_ldos)
-      CALL section_vals_val_get(lvcg_sec, "ENERGY_STEP", r_val=bs_env%energy_step_ldos)
-      CALL section_vals_val_get(lvcg_sec, "BIN_MESH", i_vals=bs_env%bin_mesh)
+      CALL section_vals_val_get(ldos_sec, "INTEGRATION", i_val=bs_env%int_ldos_xyz)
+      CALL section_vals_val_get(ldos_sec, "BIN_MESH", i_vals=bs_env%bin_mesh)
 
       NULLIFY (kp_bs_sec)
       kp_bs_sec => section_vals_get_subs_vals(bs_sec, "BANDSTRUCTURE_PATH")
@@ -316,6 +312,7 @@ CONTAINS
 
       ALLOCATE (kpoints%xkp(3, nkp), kpoints%wkp(nkp))
       kpoints%wkp(1:nkp_of_kp_grid) = 1.0_dp/REAL(nkp_of_kp_grid, KIND=dp)
+
       CALL compute_xkp(kpoints%xkp, 1, nkp_of_kp_grid, nkp_grid)
       ! Γ-point
       kpoints%xkp(1:3, nkp) = 0.0_dp
@@ -405,27 +402,36 @@ CONTAINS
 
       CHARACTER(LEN=*), PARAMETER :: routineN = 'diagonalize_ks_matrix'
 
-      INTEGER                                            :: handle
+      INTEGER                                            :: handle, ispin
+      REAL(KIND=dp)                                      :: CBM, VBM
 
       CALL timeset(routineN, handle)
 
-      ! use work matrices because the matrices are overwritten in cp_fm_geeig_canon
-      CALL cp_fm_to_fm(bs_env%fm_ks_Gamma(1), bs_env%fm_work_mo(1))
-      CALL cp_fm_to_fm(bs_env%fm_s_Gamma, bs_env%fm_work_mo(2))
+      ALLOCATE (bs_env%eigenval_scf_Gamma(bs_env%n_ao, bs_env%n_spin))
 
-      ALLOCATE (bs_env%eigenval_scf_Gamma(bs_env%n_ao))
+      DO ispin = 1, bs_env%n_spin
 
-      ! diagonalize the Kohn-Sham matrix to obtain MO coefficients and SCF eigenvalues
-      ! (at the Gamma-point)
-      CALL cp_fm_geeig_canon(bs_env%fm_work_mo(1), &
-                             bs_env%fm_work_mo(2), &
-                             bs_env%fm_mo_coeff_Gamma(1), &
-                             bs_env%eigenval_scf_Gamma, &
-                             bs_env%fm_work_mo(3), &
-                             bs_env%eps_eigval_mat_s)
+         ! use work matrices because the matrices are overwritten in cp_fm_geeig_canon
+         CALL cp_fm_to_fm(bs_env%fm_ks_Gamma(ispin), bs_env%fm_work_mo(1))
+         CALL cp_fm_to_fm(bs_env%fm_s_Gamma, bs_env%fm_work_mo(2))
 
-      bs_env%e_fermi(1) = 0.5_dp*(bs_env%eigenval_scf_Gamma(bs_env%n_occ(1)) + &
-                                  bs_env%eigenval_scf_Gamma(bs_env%n_occ(1) + 1))
+         ! diagonalize the Kohn-Sham matrix to obtain MO coefficients and SCF eigenvalues
+         ! (at the Gamma-point)
+         CALL cp_fm_geeig_canon(bs_env%fm_work_mo(1), &
+                                bs_env%fm_work_mo(2), &
+                                bs_env%fm_mo_coeff_Gamma(ispin), &
+                                bs_env%eigenval_scf_Gamma(:, ispin), &
+                                bs_env%fm_work_mo(3), &
+                                bs_env%eps_eigval_mat_s)
+
+         VBM = bs_env%eigenval_scf_Gamma(bs_env%n_occ(ispin), ispin)
+         CBM = bs_env%eigenval_scf_Gamma(bs_env%n_occ(ispin) + 1, ispin)
+
+         bs_env%band_edges_scf_Gamma(ispin)%VBM = VBM
+         bs_env%band_edges_scf_Gamma(ispin)%CBM = CBM
+         bs_env%e_fermi(ispin) = 0.5_dp*(VBM + CBM)
+
+      END DO
 
       CALL timestop(handle)
 
@@ -516,9 +522,6 @@ CONTAINS
       bs_env%n_spin = dft_control%nspins
       IF (bs_env%n_spin == 1) bs_env%spin_degeneracy = 2.0_dp
       IF (bs_env%n_spin == 2) bs_env%spin_degeneracy = 1.0_dp
-
-      ! so far, only closed-shell
-      CPASSERT(bs_env%n_spin == 1)
 
       CALL get_mo_set(mo_set=mos(1), nao=n_ao, homo=homo)
       bs_env%n_ao = n_ao
@@ -631,7 +634,7 @@ CONTAINS
       CALL dbcsr_create(bs_env%mat_ao_ao%matrix, template=matrix_s(1)%matrix, &
                         matrix_type=dbcsr_type_no_symmetry)
 
-      ALLOCATE (bs_env%eigenval_scf(bs_env%n_ao, bs_env%nkp_DOS))
+      ALLOCATE (bs_env%eigenval_scf(bs_env%n_ao, bs_env%nkp_DOS, bs_env%n_spin))
 
       CALL timestop(handle)
 
@@ -1339,29 +1342,29 @@ CONTAINS
 
       CHARACTER(LEN=*), PARAMETER                        :: routineN = 'dos_pdos_ldos'
 
-      INTEGER                                            :: handle, homo, homo_spinor, i_E, i_kind, &
-                                                            i_mo, ikp, n_ao, n_E, &
-                                                            n_primitive_cells, nkind
-      REAL(KIND=dp) :: broadening, E_max, E_max_G0W0, E_min, E_min_G0W0, E_total_window, energy, &
-         energy_step_DOS, energy_window_DOS, ev, wkp
-      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:)           :: DOS_G0W0, DOS_G0W0_SOC, DOS_scf, &
-                                                            DOS_scf_SOC, eigenval, eigenval_spinor
+      INTEGER                                            :: handle, homo, homo_1, homo_2, &
+                                                            homo_spinor, ikp, ispin, n_ao, n_E, &
+                                                            nkind
+      REAL(KIND=dp)                                      :: broadening, E_max, E_max_G0W0, E_min, &
+                                                            E_min_G0W0, E_total_window, &
+                                                            energy_step_DOS, energy_window_DOS
+      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:) :: DOS_G0W0, DOS_G0W0_SOC, DOS_scf, DOS_scf_SOC, &
+         eigenval, eigenval_spinor, eigenval_spinor_G0W0, eigenval_spinor_no_SOC
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :)        :: PDOS_G0W0, PDOS_G0W0_SOC, PDOS_scf, &
-                                                            PDOS_scf_SOC, proj_mo_on_kind, &
-                                                            proj_mo_on_kind_spinor
+                                                            PDOS_scf_SOC, proj_mo_on_kind
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :, :)     :: LDOS_G0W0_2d, LDOS_scf_2d, &
                                                             LDOS_scf_2d_SOC
       TYPE(band_edges_type)                              :: band_edges_G0W0, band_edges_G0W0_SOC, &
                                                             band_edges_scf, band_edges_scf_guess, &
                                                             band_edges_scf_SOC
-      TYPE(cp_cfm_type) :: cfm_ks_ikp, cfm_ks_ikp_spinor, cfm_mos_ikp, cfm_mos_ikp_spinor, &
-         cfm_s_ikp, cfm_s_ikp_copy, cfm_s_ikp_spinor, cfm_s_ikp_spinor_copy, cfm_work_ikp, &
-         cfm_work_ikp_spinor
+      TYPE(cp_cfm_type) :: cfm_ks_ikp, cfm_ks_ikp_spinor, cfm_mos_ikp_spinor, cfm_s_ikp, &
+         cfm_s_ikp_copy, cfm_s_ikp_spinor, cfm_s_ikp_spinor_copy, cfm_SOC_ikp_spinor, &
+         cfm_spinor_wf_ikp, cfm_work_ikp, cfm_work_ikp_spinor
+      TYPE(cp_cfm_type), DIMENSION(2)                    :: cfm_mos_ikp
 
       CALL timeset(routineN, handle)
 
       n_ao = bs_env%n_ao
-      homo = bs_env%n_occ(1)
 
       energy_window_DOS = bs_env%energy_window_DOS
       energy_step_DOS = bs_env%energy_step_DOS
@@ -1372,8 +1375,19 @@ CONTAINS
          band_edges_scf = bs_env%band_edges_scf
          band_edges_scf_guess = band_edges_scf
       ELSE
-         band_edges_scf_guess%VBM = bs_env%eigenval_scf_Gamma(homo)
-         band_edges_scf_guess%CBM = bs_env%eigenval_scf_Gamma(homo + 1)
+
+         IF (bs_env%n_spin == 1) THEN
+            homo = bs_env%n_occ(1)
+            band_edges_scf_guess%VBM = bs_env%eigenval_scf_Gamma(homo, 1)
+            band_edges_scf_guess%CBM = bs_env%eigenval_scf_Gamma(homo + 1, 1)
+         ELSE
+            homo_1 = bs_env%n_occ(1)
+            homo_2 = bs_env%n_occ(2)
+            band_edges_scf_guess%VBM = MAX(bs_env%eigenval_scf_Gamma(homo_1, 1), &
+                                           bs_env%eigenval_scf_Gamma(homo_2, 2))
+            band_edges_scf_guess%CBM = MIN(bs_env%eigenval_scf_Gamma(homo_1 + 1, 1), &
+                                           bs_env%eigenval_scf_Gamma(homo_2 + 1, 2))
+         END IF
 
          ! initialization
          band_edges_scf%VBM = -1000.0_dp
@@ -1410,11 +1424,11 @@ CONTAINS
 
       ALLOCATE (proj_mo_on_kind(n_ao, nkind))
       proj_mo_on_kind(:, :) = 0.0_dp
-      ALLOCATE (proj_mo_on_kind_spinor(2*n_ao, nkind))
-      proj_mo_on_kind_spinor(:, :) = 0.0_dp
 
       ALLOCATE (eigenval(n_ao))
       ALLOCATE (eigenval_spinor(2*n_ao))
+      ALLOCATE (eigenval_spinor_no_SOC(2*n_ao))
+      ALLOCATE (eigenval_spinor_G0W0(2*n_ao))
 
       IF (bs_env%do_gw) THEN
 
@@ -1430,7 +1444,8 @@ CONTAINS
 
       END IF
 
-      CALL cp_cfm_create(cfm_mos_ikp, bs_env%fm_ks_Gamma(1)%matrix_struct)
+      CALL cp_cfm_create(cfm_mos_ikp(1), bs_env%fm_ks_Gamma(1)%matrix_struct)
+      CALL cp_cfm_create(cfm_mos_ikp(2), bs_env%fm_ks_Gamma(1)%matrix_struct)
       CALL cp_cfm_create(cfm_work_ikp, bs_env%fm_ks_Gamma(1)%matrix_struct)
       CALL cp_cfm_create(cfm_s_ikp_copy, bs_env%fm_ks_Gamma(1)%matrix_struct)
 
@@ -1440,15 +1455,16 @@ CONTAINS
          CALL cp_cfm_create(cfm_work_ikp_spinor, bs_env%cfm_ks_spinor_ao_Gamma%matrix_struct)
          CALL cp_cfm_create(cfm_s_ikp_spinor_copy, bs_env%cfm_ks_spinor_ao_Gamma%matrix_struct)
          CALL cp_cfm_create(cfm_ks_ikp_spinor, bs_env%cfm_ks_spinor_ao_Gamma%matrix_struct)
+         CALL cp_cfm_create(cfm_SOC_ikp_spinor, bs_env%cfm_ks_spinor_ao_Gamma%matrix_struct)
          CALL cp_cfm_create(cfm_s_ikp_spinor, bs_env%cfm_ks_spinor_ao_Gamma%matrix_struct)
+         CALL cp_cfm_create(cfm_spinor_wf_ikp, bs_env%cfm_ks_spinor_ao_Gamma%matrix_struct)
 
-         homo_spinor = 2*bs_env%n_occ(1)
+         homo_spinor = bs_env%n_occ(1) + bs_env%n_occ(bs_env%n_spin)
 
          band_edges_scf_SOC%VBM = -1000.0_dp
          band_edges_scf_SOC%CBM = 1000.0_dp
          band_edges_scf_SOC%DBG = 1000.0_dp
 
-         ! JW for later: G0W0+SOC
          IF (bs_env%do_gw) THEN
             band_edges_G0W0_SOC%VBM = -1000.0_dp
             band_edges_G0W0_SOC%CBM = 1000.0_dp
@@ -1457,14 +1473,8 @@ CONTAINS
 
       END IF
 
-      IF (bs_env%do_local_vbm_cbm_gap) THEN
+      IF (bs_env%do_ldos) THEN
          CPASSERT(bs_env%int_ldos_xyz == int_ldos_z)
-      END IF
-
-      IF (bs_env%do_bs) THEN
-         n_primitive_cells = bs_env%n_primitive_cells
-      ELSE
-         n_primitive_cells = 1
       END IF
 
       IF (bs_env%unit_nr > 0) THEN
@@ -1475,120 +1485,80 @@ CONTAINS
 
          bs_env%t1 = m_walltime()
 
-         ! 1. get H^KS_µν(k_i) from H^KS_µν(k=0)
-         CALL cfm_ikp_from_fm_Gamma(cfm_ks_ikp, bs_env%fm_ks_Gamma(1), &
-                                    ikp, qs_env, bs_env%kpoints_DOS, "ORB")
+         DO ispin = 1, bs_env%n_spin
 
-         ! 2. get S_µν(k_i) from S_µν(k=0)
-         CALL cfm_ikp_from_fm_Gamma(cfm_s_ikp, bs_env%fm_s_Gamma, &
-                                    ikp, qs_env, bs_env%kpoints_DOS, "ORB")
-         CALL cp_cfm_to_cfm(cfm_s_ikp, cfm_s_ikp_copy)
+            ! 1. get H^KS_µν(k_i) from H^KS_µν(k=0)
+            CALL cfm_ikp_from_fm_Gamma(cfm_ks_ikp, bs_env%fm_ks_Gamma(ispin), &
+                                       ikp, qs_env, bs_env%kpoints_DOS, "ORB")
 
-         ! 3. Diagonalize (Roothaan-Hall): H_KS(k_i)*C(k_i) = S(k_i)*C(k_i)*ϵ(k_i)
-         CALL cp_cfm_geeig(cfm_ks_ikp, cfm_s_ikp_copy, cfm_mos_ikp, eigenval, cfm_work_ikp)
+            ! 2. get S_µν(k_i) from S_µν(k=0)
+            CALL cfm_ikp_from_fm_Gamma(cfm_s_ikp, bs_env%fm_s_Gamma, &
+                                       ikp, qs_env, bs_env%kpoints_DOS, "ORB")
+            CALL cp_cfm_to_cfm(cfm_s_ikp, cfm_s_ikp_copy)
 
-         ! 4. Projection p_nk^A of MO ψ_nk(r) on atom type A (inspired by Mulliken charge)
-         !    p_nk^A = sum_µ^A,ν C*_µ^A,n(k) S_µ^A,ν(k) C_ν,n(k)
-         CALL compute_proj_mo_on_kind(proj_mo_on_kind, qs_env, cfm_mos_ikp, cfm_s_ikp)
+            ! 3. Diagonalize (Roothaan-Hall): H_KS(k_i)*C(k_i) = S(k_i)*C(k_i)*ϵ(k_i)
+            CALL cp_cfm_geeig(cfm_ks_ikp, cfm_s_ikp_copy, cfm_mos_ikp(ispin), &
+                              eigenval, cfm_work_ikp)
 
-         ! 5. DOS and PDOS
+            ! 4. Projection p_nk^A of MO ψ_nk(r) on atom type A (inspired by Mulliken charge)
+            !    p_nk^A = sum_µ^A,ν C*_µ^A,n(k) S_µ^A,ν(k) C_ν,n(k)
+            CALL compute_proj_mo_on_kind(proj_mo_on_kind, qs_env, cfm_mos_ikp(ispin), cfm_s_ikp)
 
-         ! normalize to the primitive cell
-         wkp = bs_env%kpoints_DOS%wkp(ikp)/n_primitive_cells
-         DO i_E = 1, n_E
-            energy = E_min + i_E*energy_step_DOS
-            DO i_mo = 1, n_ao
-               ! DOS, factor 2 for closed shell
-               DOS_scf(i_E) = DOS_scf(i_E) + 2.0_dp*wkp*Gaussian(energy - eigenval(i_mo), &
-                                                                 broadening)
-               IF (bs_env%do_gw) THEN
-                  ev = bs_env%eigenval_G0W0(i_mo, ikp)
-                  DOS_G0W0(i_E) = DOS_G0W0(i_E) + 2.0_dp*wkp*Gaussian(energy - ev, broadening)
-               END IF
-               ! PDOS
-               DO i_kind = 1, nkind
-                  IF (proj_mo_on_kind(i_mo, i_kind) > 0.0_dp) THEN
-                     PDOS_scf(i_E, i_kind) = PDOS_scf(i_E, i_kind) + &
-                                             2.0_dp*proj_mo_on_kind(i_mo, i_kind)*wkp* &
-                                             Gaussian(energy - eigenval(i_mo), broadening)
-
-                     IF (bs_env%do_gw) THEN
-                        PDOS_G0W0(i_E, i_kind) = PDOS_scf(i_E, i_kind) + &
-                                                 2.0_dp*proj_mo_on_kind(i_mo, i_kind)*wkp* &
-                                                 Gaussian(energy - ev, broadening)
-                     END IF
-                  END IF
-               END DO
-            END DO
-         END DO
-
-         IF (bs_env%do_local_vbm_cbm_gap) THEN
-            CALL add_to_LDOS_2d(LDOS_scf_2d, qs_env, ikp, bs_env, cfm_mos_ikp, &
-                                eigenval(:), band_edges_scf_guess)
+            ! 5. DOS and PDOS
+            CALL add_to_DOS_PDOS(DOS_scf, PDOS_scf, eigenval, ikp, bs_env, n_E, E_min, &
+                                 proj_mo_on_kind)
             IF (bs_env%do_gw) THEN
-               CALL add_to_LDOS_2d(LDOS_G0W0_2d, qs_env, ikp, bs_env, cfm_mos_ikp, &
-                                   bs_env%eigenval_G0W0(:, ikp), band_edges_G0W0)
+               CALL add_to_DOS_PDOS(DOS_G0W0, PDOS_G0W0, bs_env%eigenval_G0W0(:, ikp, ispin), &
+                                    ikp, bs_env, n_E, E_min, proj_mo_on_kind)
             END IF
-         END IF
 
-         band_edges_scf%VBM = MAX(band_edges_scf%VBM, eigenval(homo))
-         band_edges_scf%CBM = MIN(band_edges_scf%CBM, eigenval(homo + 1))
-         band_edges_scf%DBG = MIN(band_edges_scf%DBG, eigenval(homo + 1) - eigenval(homo))
+            IF (bs_env%do_ldos) THEN
+               CALL add_to_LDOS_2d(LDOS_scf_2d, qs_env, ikp, bs_env, cfm_mos_ikp(ispin), &
+                                   eigenval(:), band_edges_scf_guess)
+
+               IF (bs_env%do_gw) THEN
+                  CALL add_to_LDOS_2d(LDOS_G0W0_2d, qs_env, ikp, bs_env, cfm_mos_ikp(ispin), &
+                                      bs_env%eigenval_G0W0(:, ikp, 1), band_edges_G0W0)
+               END IF
+
+            END IF
+
+            homo = bs_env%n_occ(ispin)
+
+            band_edges_scf%VBM = MAX(band_edges_scf%VBM, eigenval(homo))
+            band_edges_scf%CBM = MIN(band_edges_scf%CBM, eigenval(homo + 1))
+            band_edges_scf%DBG = MIN(band_edges_scf%DBG, eigenval(homo + 1) - eigenval(homo))
+
+         END DO ! spin
 
          ! now the same with spin-orbit coupling
          IF (bs_env%do_soc) THEN
 
-            ! 1. get H^KS_µν,σσ'(k_i) from H^KS_µν,σσ'(k=0)
-            CALL cfm_ikp_from_cfm_spinor_Gamma(cfm_ks_ikp_spinor, bs_env%cfm_ks_spinor_ao_Gamma, &
-                                               bs_env%fm_s_Gamma%matrix_struct, &
-                                               ikp, qs_env, bs_env%kpoints_DOS, "ORB")
+            ! compute DFT+SOC eigenvalues; based on these, compute band edges, DOS and LDOS
+            CALL SOC(bs_env, qs_env, ikp, bs_env%eigenval_scf, band_edges_scf, E_min, cfm_mos_ikp, &
+                     DOS_scf_SOC, PDOS_scf_SOC, band_edges_scf_SOC, eigenval_spinor, &
+                     cfm_spinor_wf_ikp)
 
-            ! 2. get S_µν,σσ'(k_i) from S_µν,σσ'(k=0)
-            CALL cfm_ikp_from_cfm_spinor_Gamma(cfm_s_ikp_spinor, bs_env%cfm_s_spinor_Gamma, &
-                                               bs_env%fm_s_Gamma%matrix_struct, &
-                                               ikp, qs_env, bs_env%kpoints_DOS, "ORB")
-            CALL cp_cfm_to_cfm(cfm_s_ikp_spinor, cfm_s_ikp_spinor_copy)
+            IF (.NOT. bs_env%do_gw) CALL write_SOC_eigenvalues(eigenval_spinor, "SCF", ikp, bs_env)
 
-            ! 3. Diagonalize (Roothaan-Hall): H_KS(k_i)*C(k_i) = S(k_i)*C(k_i)*ϵ(k_i)
-            CALL cp_cfm_geeig(cfm_ks_ikp_spinor, cfm_s_ikp_spinor_copy, cfm_mos_ikp_spinor, &
-                              eigenval_spinor, cfm_work_ikp_spinor)
-
-            ! 4. Projection p_nk^A of spinor ψ_nk(r) on atom type A (inspired by Mulliken charge)
-            !    p_nk^A = sum_µ^A,ν,σ,σ' C*_µ^Aσ,n(k) S_µ^A,ν,σσ'(k) C_νσ',nσ(k)
-            CALL compute_proj_mo_on_kind(proj_mo_on_kind_spinor, qs_env, &
-                                         cfm_mos_ikp_spinor, cfm_s_ikp_spinor)
-
-            ! 5. DOS and PDOS from spinors
-            DO i_E = 1, n_E
-               energy = E_min + i_E*energy_step_DOS
-               DO i_mo = 1, 2*n_ao
-                  ! DOS from spinors
-                  DOS_scf_SOC(i_E) = DOS_scf_SOC(i_E) + wkp*Gaussian(energy - eigenval_spinor(i_mo), &
-                                                                     broadening)
-                  ! PDOS from spinors
-                  DO i_kind = 1, nkind
-                     IF (proj_mo_on_kind_spinor(i_mo, i_kind) > 0.0_dp) THEN
-                        PDOS_scf_SOC(i_E, i_kind) = PDOS_scf_SOC(i_E, i_kind) + &
-                                                    proj_mo_on_kind_spinor(i_mo, i_kind)*wkp* &
-                                                    Gaussian(energy - eigenval_spinor(i_mo), &
-                                                             broadening)
-                     END IF
-                  END DO
-               END DO
-            END DO
-
-            ! 6. VBM and CBM
-            band_edges_scf_SOC%VBM = MAX(band_edges_scf_SOC%VBM, eigenval_spinor(homo_spinor))
-            band_edges_scf_SOC%CBM = MIN(band_edges_scf_SOC%CBM, eigenval_spinor(homo_spinor + 1))
-            band_edges_scf_SOC%DBG = MIN(band_edges_scf_SOC%DBG, eigenval_spinor(homo_spinor + 1) &
-                                         - eigenval_spinor(homo_spinor))
-
-            CALL write_SOC_eigenvalues(eigenval_spinor, "SCF", ikp, bs_env)
-
-            IF (bs_env%do_local_vbm_cbm_gap) THEN
-               CALL add_to_LDOS_2d(LDOS_scf_2d_SOC, qs_env, ikp, bs_env, cfm_mos_ikp_spinor, &
+            IF (bs_env%do_ldos) THEN
+               CALL add_to_LDOS_2d(LDOS_scf_2d_SOC, qs_env, ikp, bs_env, cfm_spinor_wf_ikp, &
                                    eigenval_spinor, band_edges_scf_guess, .TRUE., cfm_work_ikp)
             END IF
+
+            IF (bs_env%do_gw) THEN
+
+               ! compute G0W0+SOC eigenvalues; based on these, compute band edges, DOS and LDOS
+               CALL SOC(bs_env, qs_env, ikp, bs_env%eigenval_G0W0, band_edges_G0W0, &
+                        E_min, cfm_mos_ikp, DOS_G0W0_SOC, PDOS_G0W0_SOC, &
+                        band_edges_G0W0_SOC, eigenval_spinor_G0W0, cfm_spinor_wf_ikp)
+
+               ! write SCF+SOC and G0W0+SOC eigenvalues to file
+               ! SCF_and_G0W0_band_structure_for_kpoint_<ikp>_+_SOC
+               CALL write_SOC_eigenvalues(eigenval_spinor, "SCF_and_G0W0", ikp, bs_env, &
+                                          eigenval_spinor_G0W0)
+
+            END IF ! do_gw
 
          END IF ! do_soc
 
@@ -1603,23 +1573,26 @@ CONTAINS
       band_edges_scf%IDBG = band_edges_scf%CBM - band_edges_scf%VBM
       IF (bs_env%do_soc) THEN
          band_edges_scf_SOC%IDBG = band_edges_scf_SOC%CBM - band_edges_scf_SOC%VBM
+         IF (bs_env%do_gw) THEN
+            band_edges_G0W0_SOC%IDBG = band_edges_G0W0_SOC%CBM - band_edges_G0W0_SOC%VBM
+         END IF
       END IF
 
       CALL write_band_edges(band_edges_scf, "SCF", bs_env)
       CALL write_dos_pdos(DOS_scf, PDOS_scf, bs_env, qs_env, "SCF", E_min, band_edges_scf%VBM)
-      IF (bs_env%do_local_vbm_cbm_gap) THEN
-         CALL compute_print_local_VBM_CBM_gap(LDOS_scf_2d, bs_env, band_edges_scf, "SCF")
+      IF (bs_env%do_ldos) THEN
+         CALL print_LDOS_main(LDOS_scf_2d, bs_env, band_edges_scf, "SCF")
       END IF
 
       IF (bs_env%do_soc) THEN
          CALL write_band_edges(band_edges_scf_SOC, "SCF+SOC", bs_env)
          CALL write_dos_pdos(DOS_scf_SOC, PDOS_scf_SOC, bs_env, qs_env, "SCF_SOC", &
                              E_min, band_edges_scf_SOC%VBM)
-         IF (bs_env%do_local_vbm_cbm_gap) THEN
+         IF (bs_env%do_ldos) THEN
             ! argument band_edges_scf is actually correct because the non-SOC band edges
             ! have been used as reference in add_to_LDOS_2d
-            CALL compute_print_local_VBM_CBM_gap(LDOS_scf_2d_SOC, bs_env, band_edges_scf, &
-                                                 "SCF_SOC")
+            CALL print_LDOS_main(LDOS_scf_2d_SOC, bs_env, band_edges_scf, &
+                                 "SCF_SOC")
          END IF
       END IF
 
@@ -1627,22 +1600,31 @@ CONTAINS
          CALL write_band_edges(band_edges_G0W0, "G0W0", bs_env)
          CALL write_dos_pdos(DOS_G0W0, PDOS_G0W0, bs_env, qs_env, "G0W0", E_min, &
                              band_edges_G0W0%VBM)
-         IF (bs_env%do_local_vbm_cbm_gap) THEN
-            CALL compute_print_local_VBM_CBM_gap(LDOS_G0W0_2d, bs_env, band_edges_G0W0, "G0W0")
+         IF (bs_env%do_ldos) THEN
+            CALL print_LDOS_main(LDOS_G0W0_2d, bs_env, band_edges_G0W0, "G0W0")
          END IF
+      END IF
+
+      IF (bs_env%do_soc .AND. bs_env%do_gw) THEN
+         CALL write_band_edges(band_edges_G0W0_SOC, "G0W0+SOC", bs_env)
+         CALL write_dos_pdos(DOS_G0W0_SOC, PDOS_G0W0_SOC, bs_env, qs_env, "G0W0_SOC", E_min, &
+                             band_edges_G0W0_SOC%VBM)
       END IF
 
       CALL cp_cfm_release(cfm_s_ikp)
       CALL cp_cfm_release(cfm_ks_ikp)
-      CALL cp_cfm_release(cfm_mos_ikp)
+      CALL cp_cfm_release(cfm_mos_ikp(1))
+      CALL cp_cfm_release(cfm_mos_ikp(2))
       CALL cp_cfm_release(cfm_work_ikp)
       CALL cp_cfm_release(cfm_s_ikp_copy)
 
       CALL cp_cfm_release(cfm_s_ikp_spinor)
       CALL cp_cfm_release(cfm_ks_ikp_spinor)
+      CALL cp_cfm_release(cfm_SOC_ikp_spinor)
       CALL cp_cfm_release(cfm_mos_ikp_spinor)
       CALL cp_cfm_release(cfm_work_ikp_spinor)
       CALL cp_cfm_release(cfm_s_ikp_spinor_copy)
+      CALL cp_cfm_release(cfm_spinor_wf_ikp)
 
       CALL timestop(handle)
 
@@ -1655,36 +1637,30 @@ CONTAINS
 !> \param band_edges ...
 !> \param scf_gw_soc ...
 ! **************************************************************************************************
-   SUBROUTINE compute_print_local_VBM_CBM_gap(LDOS_2d, bs_env, band_edges, scf_gw_soc)
+   SUBROUTINE print_LDOS_main(LDOS_2d, bs_env, band_edges, scf_gw_soc)
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :, :)     :: LDOS_2d
       TYPE(post_scf_bandstructure_type), POINTER         :: bs_env
       TYPE(band_edges_type)                              :: band_edges
       CHARACTER(LEN=*)                                   :: scf_gw_soc
 
-      CHARACTER(LEN=*), PARAMETER :: routineN = 'compute_print_local_VBM_CBM_gap'
+      CHARACTER(LEN=*), PARAMETER                        :: routineN = 'print_LDOS_main'
 
-      INTEGER :: handle, i_E, i_E_occ_end, i_E_occ_start, i_E_vir_end, i_E_vir_start, i_eps, &
-         i_window, i_x, i_x_bin, i_x_end, i_x_end_bin, i_x_end_glob, i_x_start, i_x_start_bin, &
-         i_x_start_glob, i_y, i_y_bin, i_y_end, i_y_end_bin, i_y_end_glob, i_y_start, &
-         i_y_start_bin, i_y_start_glob, n_E, n_E_occ, n_E_vir, n_eps, n_windows
+      INTEGER :: handle, i_x, i_x_bin, i_x_end, i_x_end_bin, i_x_end_glob, i_x_start, &
+         i_x_start_bin, i_x_start_glob, i_y, i_y_bin, i_y_end, i_y_end_bin, i_y_end_glob, &
+         i_y_start, i_y_start_bin, i_y_start_glob, n_E
+      INTEGER, ALLOCATABLE, DIMENSION(:, :)              :: n_sum_for_bins
       INTEGER, DIMENSION(2)                              :: bin_mesh
       LOGICAL                                            :: do_xy_bins
-      REAL(KIND=dp)                                      :: E_max_i_window, E_min, E_min_i_window, &
-                                                            energy, energy_step_ldos, eps, &
-                                                            max_energy_window_ldos, win
-      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :)        :: avg_LDOS_occ, avg_LDOS_vir, local_CBM, &
-                                                            local_gap, local_VBM
+      REAL(KIND=dp)                                      :: E_min, energy_step, energy_window
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :, :)     :: LDOS_2d_bins
 
       CALL timeset(routineN, handle)
 
-      n_eps = SIZE(bs_env%eps_ldos)
-      n_windows = SIZE(bs_env%energy_window_ldos)
       n_E = SIZE(LDOS_2d, 3)
 
-      max_energy_window_ldos = MAXVAL(bs_env%energy_window_ldos)
-      energy_step_ldos = bs_env%energy_step_ldos
-      E_min = band_edges%VBM - 0.5_dp*max_energy_window_ldos
+      energy_window = bs_env%energy_window_DOS
+      energy_step = bs_env%energy_step_DOS
+      E_min = band_edges%VBM - 0.5_dp*energy_window
 
       bin_mesh(1:2) = bs_env%bin_mesh(1:2)
       do_xy_bins = (bin_mesh(1) > 0 .AND. bin_mesh(2) > 0)
@@ -1706,8 +1682,6 @@ CONTAINS
          i_y_end_bin = i_y_end
       END IF
 
-      ALLOCATE (avg_LDOS_occ(i_x_start_bin:i_x_end_bin, i_y_start_bin:i_y_end_bin))
-      ALLOCATE (avg_LDOS_vir(i_x_start_bin:i_x_end_bin, i_y_start_bin:i_y_end_bin))
       ALLOCATE (LDOS_2d_bins(i_x_start_bin:i_x_end_bin, i_y_start_bin:i_y_end_bin, n_E))
       LDOS_2d_bins(:, :, :) = 0.0_dp
 
@@ -1723,6 +1697,9 @@ CONTAINS
          CALL bs_env%para_env%min(i_y_start_glob)
          CALL bs_env%para_env%max(i_y_end_glob)
 
+         ALLOCATE (n_sum_for_bins(bin_mesh(1), bin_mesh(2)))
+         n_sum_for_bins(:, :) = 0
+
          ! transform interval [i_x_start, i_x_end] to [1, bin_mesh(1)] (and same for y)
          DO i_x = i_x_start, i_x_end
             DO i_y = i_y_start, i_y_end
@@ -1730,10 +1707,20 @@ CONTAINS
                i_y_bin = bin_mesh(2)*(i_y - i_y_start_glob)/(i_y_end_glob - i_y_start_glob + 1) + 1
                LDOS_2d_bins(i_x_bin, i_y_bin, :) = LDOS_2d_bins(i_x_bin, i_y_bin, :) + &
                                                    LDOS_2d(i_x, i_y, :)
+               n_sum_for_bins(i_x_bin, i_y_bin) = n_sum_for_bins(i_x_bin, i_y_bin) + 1
             END DO
          END DO
 
          CALL bs_env%para_env%sum(LDOS_2d_bins)
+         CALL bs_env%para_env%sum(n_sum_for_bins)
+
+         ! divide by number of terms in the sum so we have the average LDOS(x,y,E)
+         DO i_x_bin = 1, bin_mesh(1)
+            DO i_y_bin = 1, bin_mesh(2)
+               LDOS_2d_bins(i_x_bin, i_y_bin, :) = LDOS_2d_bins(i_x_bin, i_y_bin, :)/ &
+                                                   REAL(n_sum_for_bins(i_x_bin, i_y_bin), KIND=dp)
+            END DO
+         END DO
 
       ELSE
 
@@ -1743,100 +1730,13 @@ CONTAINS
 
       IF (bin_mesh(1)*bin_mesh(2) < bs_env%n_bins_max_for_printing) THEN
          CALL print_LDOS_2d_bins(LDOS_2d_bins, bs_env, E_min, scf_gw_soc)
+      ELSE
+         CPWARN("The number of bins for the LDOS is too large. Decrease BIN_MESH.")
       END IF
-
-      ALLOCATE (local_VBM(i_x_start_bin:i_x_end_bin, i_y_start_bin:i_y_end_bin))
-      ALLOCATE (local_CBM(i_x_start_bin:i_x_end_bin, i_y_start_bin:i_y_end_bin))
-      ALLOCATE (local_gap(i_x_start_bin:i_x_end_bin, i_y_start_bin:i_y_end_bin))
-
-      DO i_window = 1, n_windows
-
-         win = bs_env%energy_window_ldos(i_window)
-
-         i_E_occ_start = 1E7
-         i_E_occ_end = -1E7
-         i_E_vir_start = 1E7
-         i_E_vir_end = -1E7
-
-         DO i_E = 1, n_E
-
-            energy = E_min + i_E*energy_step_ldos
-
-            E_min_i_window = band_edges%VBM - win/2.0_dp
-            E_max_i_window = band_edges%CBM + win/2.0_dp
-
-            IF (energy >= E_min_i_window) i_E_occ_start = MIN(i_E_occ_start, i_E)
-            IF (energy <= band_edges%VBM) i_E_occ_end = MAX(i_E_occ_end, i_E)
-            IF (energy >= band_edges%CBM) i_E_vir_start = MIN(i_E_vir_start, i_E)
-            IF (energy <= E_max_i_window) i_E_vir_end = MAX(i_E_vir_end, i_E)
-
-         END DO
-
-         n_E_occ = i_E_occ_end - i_E_occ_start + 1
-         n_E_vir = i_E_vir_end - i_E_vir_start + 1
-
-         DO i_x = i_x_start_bin, i_x_end_bin
-            DO i_y = i_y_start_bin, i_y_end_bin
-               avg_LDOS_occ(i_x, i_y) = SUM(LDOS_2d_bins(i_x, i_y, i_E_occ_start:i_E_occ_end)) &
-                                        /n_E_occ
-               avg_LDOS_vir(i_x, i_y) = SUM(LDOS_2d_bins(i_x, i_y, i_E_vir_start:i_E_vir_end)) &
-                                        /n_E_vir
-            END DO
-         END DO
-
-         DO i_eps = 1, n_eps
-
-            local_VBM(:, :) = 0.0_dp
-            local_CBM(:, :) = 0.0_dp
-            local_gap(:, :) = 0.0_dp
-
-            DO i_x = i_x_start_bin, i_x_end_bin
-               DO i_y = i_y_start_bin, i_y_end_bin
-
-                  DO i_E = n_E/2, 1, -1
-
-                     eps = bs_env%eps_ldos(i_eps)*avg_LDOS_occ(i_x, i_y)
-
-                     IF (LDOS_2d_bins(i_x, i_y, i_E) > eps) THEN
-                        energy = E_min + i_E*energy_step_ldos
-                        local_VBM(i_x, i_y) = energy
-                        ! do not look for lower energies as we have found the local VBM
-                        EXIT
-                     END IF
-
-                  END DO ! i_E
-
-                  DO i_E = n_E/2 + 1, n_E
-
-                     eps = bs_env%eps_ldos(i_eps)*avg_LDOS_vir(i_x, i_y)
-
-                     IF (LDOS_2d_bins(i_x, i_y, i_E) > eps) THEN
-                        energy = E_min + i_E*energy_step_ldos
-                        local_CBM(i_x, i_y) = energy
-                        ! do not look for higher energies as we have found the local CBM
-                        EXIT
-                     END IF
-
-                  END DO ! i_E
-
-                  local_gap(i_x, i_y) = local_CBM(i_x, i_y) - local_VBM(i_x, i_y)
-
-               END DO ! i_y
-            END DO ! i_x
-
-            eps = bs_env%eps_ldos(i_eps)
-
-            CALL sum_and_print_2d_map("VBM", scf_gw_soc, local_VBM, bs_env, eps, win, do_xy_bins)
-            CALL sum_and_print_2d_map("CBM", scf_gw_soc, local_CBM, bs_env, eps, win, do_xy_bins)
-            CALL sum_and_print_2d_map("gap", scf_gw_soc, local_gap, bs_env, eps, win, do_xy_bins)
-
-         END DO ! i_eps
-
-      END DO ! i_window
 
       CALL timestop(handle)
 
-   END SUBROUTINE compute_print_local_VBM_CBM_gap
+   END SUBROUTINE print_LDOS_main
 
 ! **************************************************************************************************
 !> \brief ...
@@ -1855,7 +1755,7 @@ CONTAINS
 
       CHARACTER(LEN=18)                                  :: print_format
       CHARACTER(LEN=4)                                   :: print_format_1, print_format_2
-      CHARACTER(len=default_path_length)                 :: fname
+      CHARACTER(len=default_string_length)               :: fname
       INTEGER                                            :: handle, i_E, i_x, i_x_end, i_x_start, &
                                                             i_y, i_y_end, i_y_start, iunit, n_E, &
                                                             n_x, n_y
@@ -1888,49 +1788,20 @@ CONTAINS
 
                print_format = "(3A,"//print_format_1//",A,"//print_format_2//",A)"
 
-!               IF (coord(1) < -1000/angstrom .AND. coord(2) < -1000/angstrom) THEN
-!                  print_format = "(3A,F7.2,A,F7.2,A)"
-!               ELSE IF (coord(1) < -100/angstrom .AND. coord(2) < -1000/angstrom) THEN
-!                  print_format = "(3A,F6.2,A,F7.2,A)"
-!               ELSE IF (coord(1) < -1000/angstrom .AND. coord(2) < -100/angstrom) THEN
-!                  print_format = "(3A,F7.2,A,F6.2,A)"
-!               ELSE IF (coord(1) < -100/angstrom .AND. coord(2) < -100/angstrom) THEN
-!                  print_format = "(3A,F6.2,A,F6.2,A)"
-!               ELSE IF (coord(1) < -100/angstrom .AND. coord(2) < -10/angstrom) THEN
-!                  print_format = "(3A,F6.2,A,F5.2,A)"
-!               ELSE IF (coord(1) < -10/angstrom .AND. coord(2) < -100/angstrom) THEN
-!                  print_format = "(3A,F5.2,A,F6.2,A)"
-!               ELSE IF (coord(1) < -10/angstrom .AND. coord(2) < -10/angstrom) THEN
-!                  print_format = "(3A,F5.2,A,F5.2,A)"
-!               ELSE IF (coord(1) < -1/angstrom .AND. coord(2) < -10/angstrom) THEN
-!                  print_format = "(3A,F4.2,A,F5.2,A)"
-!               ELSE IF (coord(1) < -10/angstrom .AND. coord(2) < -1/angstrom) THEN
-!                  print_format = "(3A,F5.2,A,F4.2,A)"
-!               ELSE IF (coord(1) < 10/angstrom .AND. coord(2) < 10/angstrom) THEN
-!                  print_format = "(3A,F4.2,A,F4.2,A)"
-!               ELSE IF (coord(1) < 100/angstrom .AND. coord(2) < 10/angstrom) THEN
-!                  print_format = "(3A,F5.2,A,F4.2,A)"
-!               ELSE IF (coord(1) < 10/angstrom .AND. coord(2) < 100/angstrom) THEN
-!                  print_format = "(3A,F4.2,A,F5.2,A)"
-!               ELSE IF (coord(1) < 100/angstrom .AND. coord(2) < 100/angstrom) THEN
-!                  print_format = "(3A,F5.2,A,F5.2,A)"
-!               ELSE IF (coord(1) < 100/angstrom .AND. coord(2) < 1000/angstrom) THEN
-!                  print_format = "(3A,F5.2,A,F6.2,A)"
-!               ELSE IF (coord(1) < 1000/angstrom .AND. coord(2) < 100/angstrom) THEN
-!                  print_format = "(3A,F6.2,A,F5.2,A)"
-!               ELSE
-!                  print_format = "(3A,F6.2,A,F6.2,A)"
-!               END IF
-
                WRITE (fname, print_format) "LDOS_", scf_gw_soc, &
                   "_at_x_", coord(1)*angstrom, '_A_and_y_', coord(2)*angstrom, '_A'
 
                CALL open_file(TRIM(fname), unit_number=iunit, file_status="REPLACE", &
                               file_action="WRITE")
 
+               WRITE (iunit, "(2A)") "        Energy E (eV)    average LDOS(x,y,E) (1/(eV*Å^2), ", &
+                  "integrated over z, averaged inside bin)"
+
                DO i_E = 1, n_E
-                  energy = E_min + i_E*bs_env%energy_step_ldos
-                  WRITE (iunit, "(2F17.3)") energy*evolt, LDOS_2d_bins(i_x, i_y, i_E)*evolt
+                  energy = E_min + i_E*bs_env%energy_step_DOS
+                  WRITE (iunit, "(2F17.3)") energy*evolt, &
+                     LDOS_2d_bins(i_x, i_y, i_E)* &
+                     bs_env%unit_ldos_int_z_inv_Ang2_eV
                END DO
 
                CALL close_file(iunit)
@@ -1987,89 +1858,191 @@ CONTAINS
 
 ! **************************************************************************************************
 !> \brief ...
-!> \param vbm_cbm_gap ...
-!> \param scf_gw_soc ...
-!> \param local_VBM_CBM_gap ...
 !> \param bs_env ...
-!> \param eps ...
-!> \param win ...
-!> \param do_xy_bins ...
+!> \param qs_env ...
+!> \param ikp ...
+!> \param eigenval_no_SOC ...
+!> \param band_edges_no_SOC ...
+!> \param E_min ...
+!> \param cfm_mos_ikp ...
+!> \param DOS ...
+!> \param PDOS ...
+!> \param band_edges ...
+!> \param eigenval_spinor ...
+!> \param cfm_spinor_wf_ikp ...
 ! **************************************************************************************************
-   SUBROUTINE sum_and_print_2d_map(vbm_cbm_gap, scf_gw_soc, local_VBM_CBM_gap, &
-                                   bs_env, eps, win, do_xy_bins)
-      CHARACTER(LEN=*)                                   :: vbm_cbm_gap, scf_gw_soc
-      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :)        :: local_VBM_CBM_gap
+   SUBROUTINE SOC(bs_env, qs_env, ikp, eigenval_no_SOC, band_edges_no_SOC, E_min, cfm_mos_ikp, &
+                  DOS, PDOS, band_edges, eigenval_spinor, cfm_spinor_wf_ikp)
+
       TYPE(post_scf_bandstructure_type), POINTER         :: bs_env
-      REAL(KIND=dp)                                      :: eps, win
-      LOGICAL                                            :: do_xy_bins
+      TYPE(qs_environment_type), POINTER                 :: qs_env
+      INTEGER                                            :: ikp
+      REAL(KIND=dp), DIMENSION(:, :, :)                  :: eigenval_no_SOC
+      TYPE(band_edges_type)                              :: band_edges_no_SOC
+      REAL(KIND=dp)                                      :: E_min
+      TYPE(cp_cfm_type), DIMENSION(2)                    :: cfm_mos_ikp
+      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:)           :: DOS
+      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :)        :: PDOS
+      TYPE(band_edges_type)                              :: band_edges
+      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:)           :: eigenval_spinor
+      TYPE(cp_cfm_type)                                  :: cfm_spinor_wf_ikp
 
-      CHARACTER(LEN=*), PARAMETER :: routineN = 'sum_and_print_2d_map'
+      CHARACTER(LEN=*), PARAMETER                        :: routineN = 'SOC'
 
-      CHARACTER(len=default_path_length)                 :: fname
-      INTEGER :: handle, i_x, i_x_end, i_x_end_local, i_x_start, i_x_start_local, i_y, i_y_end, &
-         i_y_end_local, i_y_start, i_y_start_local, iunit, n_x, n_y
-      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :)        :: local_VBM_CBM_gap_all
-      REAL(KIND=dp), DIMENSION(3)                        :: coord, idx
+      INTEGER                                            :: handle, homo_spinor, n_ao, n_E, nkind
+      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:)           :: eigenval_spinor_no_SOC
+      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :)        :: proj_mo_on_kind_spinor
+      TYPE(cp_cfm_type)                                  :: cfm_eigenvec_ikp_spinor, &
+                                                            cfm_ks_ikp_spinor, cfm_mos_ikp_spinor, &
+                                                            cfm_SOC_ikp_spinor, cfm_work_ikp_spinor
 
       CALL timeset(routineN, handle)
 
-      i_x_start_local = LBOUND(local_VBM_CBM_gap, 1)
-      i_x_end_local = UBOUND(local_VBM_CBM_gap, 1)
-      i_y_start_local = LBOUND(local_VBM_CBM_gap, 2)
-      i_y_end_local = UBOUND(local_VBM_CBM_gap, 2)
+      n_ao = bs_env%n_ao
+      homo_spinor = bs_env%n_occ(1) + bs_env%n_occ(bs_env%n_spin)
+      n_E = SIZE(DOS)
+      nkind = SIZE(PDOS, 2)
 
-      i_x_start = i_x_start_local
-      i_x_end = i_x_end_local
-      i_y_start = i_y_start_local
-      i_y_end = i_y_end_local
+      CALL cp_cfm_create(cfm_ks_ikp_spinor, bs_env%cfm_ks_spinor_ao_Gamma%matrix_struct)
+      CALL cp_cfm_create(cfm_SOC_ikp_spinor, bs_env%cfm_ks_spinor_ao_Gamma%matrix_struct)
+      CALL cp_cfm_create(cfm_mos_ikp_spinor, bs_env%cfm_ks_spinor_ao_Gamma%matrix_struct)
+      CALL cp_cfm_create(cfm_work_ikp_spinor, bs_env%cfm_ks_spinor_ao_Gamma%matrix_struct)
+      CALL cp_cfm_create(cfm_eigenvec_ikp_spinor, bs_env%cfm_ks_spinor_ao_Gamma%matrix_struct)
 
-      CALL bs_env%para_env%min(i_x_start)
-      CALL bs_env%para_env%max(i_x_end)
-      CALL bs_env%para_env%min(i_y_start)
-      CALL bs_env%para_env%max(i_y_end)
+      ALLOCATE (eigenval_spinor_no_SOC(2*n_ao))
+      ALLOCATE (proj_mo_on_kind_spinor(2*n_ao, nkind))
+      ! PDOS not yet implemented -> projection is just zero -> PDOS is zero
+      proj_mo_on_kind_spinor(:, :) = 0.0_dp
 
-      n_x = i_x_end - i_x_start + 1
-      n_y = i_y_end - i_y_start + 1
+      ! 1. get V^SOC_µν,σσ'(k_i) from V^SOC_µν,σσ'(k=0)
+      CALL cfm_ikp_from_cfm_spinor_Gamma(cfm_SOC_ikp_spinor, &
+                                         bs_env%cfm_SOC_spinor_ao_Gamma, &
+                                         bs_env%fm_s_Gamma%matrix_struct, &
+                                         ikp, qs_env, bs_env%kpoints_DOS, "ORB")
 
-      ALLOCATE (local_VBM_CBM_gap_all(i_x_start:i_x_end, i_y_start:i_y_end))
-      local_VBM_CBM_gap_all(:, :) = 0.0_dp
+      ! 2. V^SOC_nn',σσ'(k_i) = sum_µν C^*_µn,σ(k_i) V^SOC_µν,σσ'(k_i) C_νn'(k_i),
+      !    C_µn,σ(k_i): MO coefficiencts from diagonalizing KS-matrix h^KS_nn',σσ'(k_i)
 
-      local_VBM_CBM_gap_all(i_x_start_local:i_x_end_local, i_y_start_local:i_y_end_local) = &
-         local_VBM_CBM_gap(:, :)
+      ! 2.1 build matrix C_µn,σ(k_i)
+      CALL cp_cfm_set_all(cfm_mos_ikp_spinor, z_zero)
+      CALL add_cfm_submat(cfm_mos_ikp_spinor, cfm_mos_ikp(1), 1, 1)
+      CALL add_cfm_submat(cfm_mos_ikp_spinor, cfm_mos_ikp(bs_env%n_spin), n_ao + 1, n_ao + 1)
 
-      IF (.NOT. do_xy_bins) THEN
+      ! 2.2 work_nν,σσ' = sum_µ C^*_µn,σ(k_i) V^SOC_µν,σσ'(k_i)
+      CALL parallel_gemm('C', 'N', 2*n_ao, 2*n_ao, 2*n_ao, z_one, &
+                         cfm_mos_ikp_spinor, cfm_SOC_ikp_spinor, &
+                         z_zero, cfm_work_ikp_spinor)
 
-         CALL bs_env%para_env%sync()
-         CALL bs_env%para_env%sum(local_VBM_CBM_gap_all)
-         CALL bs_env%para_env%sync()
+      ! 2.3 V^SOC_nn',σσ'(k_i) = sum_ν work_nν,σσ' C_νn'(k_i)
+      CALL parallel_gemm('N', 'N', 2*n_ao, 2*n_ao, 2*n_ao, z_one, &
+                         cfm_work_ikp_spinor, cfm_mos_ikp_spinor, &
+                         z_zero, cfm_ks_ikp_spinor)
 
+      ! 3. remove SOC outside of energy window (otherwise, numerical problems arise
+      !    because energetically low semicore states and energetically very high
+      !    unbound states couple to the states around the Fermi level)
+      eigenval_spinor_no_SOC(1:n_ao) = eigenval_no_SOC(1:n_ao, ikp, 1)
+      eigenval_spinor_no_SOC(n_ao + 1:) = eigenval_no_SOC(1:n_ao, ikp, bs_env%n_spin)
+      IF (bs_env%energy_window_soc > 0.0_dp) THEN
+         CALL remove_soc_outside_energy_window_mo(cfm_ks_ikp_spinor, &
+                                                  bs_env%energy_window_soc, &
+                                                  eigenval_spinor_no_SOC, &
+                                                  band_edges_no_SOC%VBM, &
+                                                  band_edges_no_SOC%CBM)
       END IF
 
-      IF (bs_env%para_env%is_source()) THEN
+      ! 4. h^G0W0+SOC_nn',σσ'(k_i) = ε_nσ^G0W0(k_i) δ_nn' δ_σσ' + V^SOC_nn',σσ'(k_i)
+      CALL cfm_add_on_diag(cfm_ks_ikp_spinor, eigenval_spinor_no_SOC)
 
-         WRITE (fname, "(4A,F5.3,A,F5.3)") vbm_cbm_gap, "_", scf_gw_soc, "_EPS_LDOS_", eps, &
-            '_ENERGY_WINDOW_', win*evolt
+      ! 5. diagonalize h^G0W0+SOC_nn',σσ'(k_i) to get eigenvalues
+      CALL cp_cfm_heevd(cfm_ks_ikp_spinor, cfm_eigenvec_ikp_spinor, eigenval_spinor)
 
-         CALL open_file(TRIM(fname), unit_number=iunit, file_status="REPLACE", file_action="WRITE")
+      ! 6. DOS from spinors, no PDOS
+      CALL add_to_DOS_PDOS(DOS, PDOS, eigenval_spinor, &
+                           ikp, bs_env, n_E, E_min, proj_mo_on_kind_spinor)
 
-         DO i_x = i_x_start, i_x_end
-            DO i_y = i_y_start, i_y_end
-               idx(1) = (REAL(i_x, KIND=dp) - 0.5_dp)/REAL(n_x, KIND=dp)
-               idx(2) = (REAL(i_y, KIND=dp) - 0.5_dp)/REAL(n_y, KIND=dp)
-               idx(3) = 0.0_dp
-               coord(1:3) = MATMUL(bs_env%hmat, idx)
-               WRITE (iunit, "(3F17.3)") coord(1)*angstrom, coord(2)*angstrom, &
-                  local_VBM_CBM_gap_all(i_x, i_y)*evolt
-            END DO
-         END DO
+      ! 7. valence band max. (VBM), conduction band min. (CBM) and direct bandgap (DBG)
+      band_edges%VBM = MAX(band_edges%VBM, eigenval_spinor(homo_spinor))
+      band_edges%CBM = MIN(band_edges%CBM, eigenval_spinor(homo_spinor + 1))
+      band_edges%DBG = MIN(band_edges%DBG, eigenval_spinor(homo_spinor + 1) &
+                           - eigenval_spinor(homo_spinor))
 
-         CALL close_file(iunit)
+      ! 8. spinor wavefunctions:
+      CALL parallel_gemm('N', 'N', 2*n_ao, 2*n_ao, 2*n_ao, z_one, &
+                         cfm_mos_ikp_spinor, cfm_eigenvec_ikp_spinor, &
+                         z_zero, cfm_spinor_wf_ikp)
 
-      END IF
+      CALL cp_cfm_release(cfm_ks_ikp_spinor)
+      CALL cp_cfm_release(cfm_SOC_ikp_spinor)
+      CALL cp_cfm_release(cfm_work_ikp_spinor)
+      CALL cp_cfm_release(cfm_eigenvec_ikp_spinor)
+      CALL cp_cfm_release(cfm_mos_ikp_spinor)
 
       CALL timestop(handle)
 
-   END SUBROUTINE sum_and_print_2d_map
+   END SUBROUTINE SOC
+
+! **************************************************************************************************
+!> \brief ...
+!> \param DOS ...
+!> \param PDOS ...
+!> \param eigenval ...
+!> \param ikp ...
+!> \param bs_env ...
+!> \param n_E ...
+!> \param E_min ...
+!> \param proj_mo_on_kind ...
+! **************************************************************************************************
+   SUBROUTINE add_to_DOS_PDOS(DOS, PDOS, eigenval, ikp, bs_env, n_E, E_min, proj_mo_on_kind)
+
+      REAL(KIND=dp), DIMENSION(:)                        :: DOS
+      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :)        :: PDOS
+      REAL(KIND=dp), DIMENSION(:)                        :: eigenval
+      INTEGER                                            :: ikp
+      TYPE(post_scf_bandstructure_type), POINTER         :: bs_env
+      INTEGER                                            :: n_E
+      REAL(KIND=dp)                                      :: E_min
+      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :)        :: proj_mo_on_kind
+
+      CHARACTER(LEN=*), PARAMETER                        :: routineN = 'add_to_DOS_PDOS'
+
+      INTEGER                                            :: handle, i_E, i_kind, i_mo, n_mo, &
+                                                            n_primitive_cells, nkind
+      REAL(KIND=dp)                                      :: broadening, energy, energy_step_DOS, wkp
+
+      CALL timeset(routineN, handle)
+
+      energy_step_DOS = bs_env%energy_step_DOS
+      broadening = bs_env%broadening_DOS
+
+      n_primitive_cells = 1
+      IF (bs_env%do_bs) n_primitive_cells = bs_env%n_primitive_cells
+
+      n_mo = SIZE(eigenval)
+      nkind = SIZE(proj_mo_on_kind, 2)
+
+      ! normalize to the primitive cell and to closed-shell / open-shell
+      wkp = bs_env%kpoints_DOS%wkp(ikp)/n_primitive_cells*bs_env%spin_degeneracy
+      DO i_E = 1, n_E
+         energy = E_min + i_E*energy_step_DOS
+         DO i_mo = 1, n_mo
+            ! DOS
+            DOS(i_E) = DOS(i_E) + wkp*Gaussian(energy - eigenval(i_mo), broadening)
+
+            ! PDOS
+            DO i_kind = 1, nkind
+               IF (proj_mo_on_kind(i_mo, i_kind) > 0.0_dp) THEN
+                  PDOS(i_E, i_kind) = PDOS(i_E, i_kind) + &
+                                      proj_mo_on_kind(i_mo, i_kind)*wkp* &
+                                      Gaussian(energy - eigenval(i_mo), broadening)
+               END IF
+            END DO
+         END DO
+      END DO
+
+      CALL timestop(handle)
+
+   END SUBROUTINE add_to_DOS_PDOS
 
 ! **************************************************************************************************
 !> \brief ...
@@ -2097,21 +2070,21 @@ CONTAINS
 
       CHARACTER(LEN=*), PARAMETER                        :: routineN = 'add_to_LDOS_2d'
 
-      INTEGER :: handle, i_E, i_x, i_x_end, i_x_start, i_y, i_y_end, i_y_start, i_z, i_z_end, &
-         i_z_start, j_col, j_mo, n_E, n_mo, ncol_local, nimages
+      INTEGER :: handle, i_E, i_x_end, i_x_start, i_y_end, i_y_start, i_z, i_z_end, i_z_start, &
+         j_col, j_mo, n_E, n_mo, n_z, ncol_local, nimages, z_end_global, z_start_global
       INTEGER, DIMENSION(:), POINTER                     :: col_indices
       LOGICAL                                            :: is_any_weight_non_zero, my_do_spinor
-      REAL(KIND=dp)                                      :: arg, E_max, E_min, E_total_window, &
-                                                            energy, energy_step_ldos, &
-                                                            max_energy_window_ldos, weight, wkp
+      REAL(KIND=dp)                                      :: broadening, E_max, E_min, &
+                                                            E_total_window, energy, energy_step, &
+                                                            energy_window, spin_degeneracy, weight
       TYPE(cp_cfm_type)                                  :: cfm_weighted_dm_ikp, cfm_work
-      TYPE(cp_fm_type)                                   :: fm_non_spinor, fm_non_spinor_2, &
-                                                            fm_weighted_dm_ikp_re
-      TYPE(dbcsr_p_type), DIMENSION(:), POINTER          :: weighted_dm_ikp_re
+      TYPE(cp_fm_type)                                   :: fm_non_spinor, fm_weighted_dm_MIC
+      TYPE(dbcsr_p_type), DIMENSION(:), POINTER          :: weighted_dm_MIC
       TYPE(dft_control_type), POINTER                    :: dft_control
+      TYPE(pw_c1d_gs_type)                               :: rho_g
       TYPE(pw_env_type), POINTER                         :: pw_env
       TYPE(pw_pool_type), POINTER                        :: auxbas_pw_pool
-      TYPE(pw_type)                                      :: LDOS_3d, rho_g
+      TYPE(pw_r3d_rs_type)                               :: LDOS_3d
       TYPE(qs_ks_env_type), POINTER                      :: ks_env
 
       CALL timeset(routineN, handle)
@@ -2125,26 +2098,39 @@ CONTAINS
       nimages = dft_control%nimages
       dft_control%nimages = 1
 
-      max_energy_window_ldos = MAXVAL(bs_env%energy_window_ldos)
-      energy_step_ldos = bs_env%energy_step_ldos
+      energy_window = bs_env%energy_window_DOS
+      energy_step = bs_env%energy_step_DOS
+      broadening = bs_env%broadening_DOS
 
-      E_min = band_edges%VBM - 0.5_dp*max_energy_window_ldos
-      E_max = band_edges%CBM + 0.5_dp*max_energy_window_ldos
+      E_min = band_edges%VBM - 0.5_dp*energy_window
+      E_max = band_edges%CBM + 0.5_dp*energy_window
       E_total_window = E_max - E_min
 
-      n_E = INT(E_total_window/energy_step_ldos)
+      n_E = INT(E_total_window/energy_step)
 
       CALL pw_env_get(pw_env, auxbas_pw_pool=auxbas_pw_pool)
 
-      CALL pw_pool_create_pw(auxbas_pw_pool, LDOS_3d, use_data=REALDATA3D, in_space=REALSPACE)
-      CALL pw_pool_create_pw(auxbas_pw_pool, rho_g, use_data=COMPLEXDATA1D, in_space=RECIPROCALSPACE)
+      CALL auxbas_pw_pool%create_pw(LDOS_3d)
+      CALL auxbas_pw_pool%create_pw(rho_g)
 
-      i_x_start = LBOUND(LDOS_3d%cr3d, 1)
-      i_x_end = UBOUND(LDOS_3d%cr3d, 1)
-      i_y_start = LBOUND(LDOS_3d%cr3d, 2)
-      i_y_end = UBOUND(LDOS_3d%cr3d, 2)
-      i_z_start = LBOUND(LDOS_3d%cr3d, 3)
-      i_z_end = UBOUND(LDOS_3d%cr3d, 3)
+      i_x_start = LBOUND(LDOS_3d%array, 1)
+      i_x_end = UBOUND(LDOS_3d%array, 1)
+      i_y_start = LBOUND(LDOS_3d%array, 2)
+      i_y_end = UBOUND(LDOS_3d%array, 2)
+      i_z_start = LBOUND(LDOS_3d%array, 3)
+      i_z_end = UBOUND(LDOS_3d%array, 3)
+
+      z_start_global = i_z_start
+      z_end_global = i_z_end
+
+      CALL bs_env%para_env%min(z_start_global)
+      CALL bs_env%para_env%max(z_end_global)
+      n_z = z_end_global - z_start_global + 1
+
+      IF (ANY(ABS(bs_env%hmat(1:2, 3)) > 1.0E-6_dp) .OR. ANY(ABS(bs_env%hmat(3, 1:2)) > 1.0E-6_dp)) &
+         CPABORT("Please choose a cell that has 90° angles to the z-direction.")
+      ! for integration, we need the dz and the conversion from H -> eV and a_Bohr -> Å
+      bs_env%unit_ldos_int_z_inv_Ang2_eV = bs_env%hmat(3, 3)/REAL(n_z, KIND=dp)/evolt/angstrom**2
 
       IF (ikp == 1) THEN
          ALLOCATE (LDOS_2d(i_x_start:i_x_end, i_y_start:i_y_end, n_E))
@@ -2153,10 +2139,9 @@ CONTAINS
 
       CALL cp_cfm_create(cfm_work, cfm_mos_ikp%matrix_struct)
       CALL cp_cfm_create(cfm_weighted_dm_ikp, cfm_mos_ikp%matrix_struct)
-      CALL cp_fm_create(fm_weighted_dm_ikp_re, cfm_mos_ikp%matrix_struct)
+      CALL cp_fm_create(fm_weighted_dm_MIC, cfm_mos_ikp%matrix_struct)
       IF (my_do_spinor) THEN
          CALL cp_fm_create(fm_non_spinor, cfm_non_spinor%matrix_struct)
-         CALL cp_fm_create(fm_non_spinor_2, cfm_non_spinor%matrix_struct)
       END IF
 
       CALL cp_cfm_get_info(matrix=cfm_mos_ikp, &
@@ -2164,28 +2149,15 @@ CONTAINS
                            ncol_local=ncol_local, &
                            col_indices=col_indices)
 
-      NULLIFY (weighted_dm_ikp_re)
-      CALL dbcsr_allocate_matrix_set(weighted_dm_ikp_re, 1)
-      ALLOCATE (weighted_dm_ikp_re(1)%matrix)
-      CALL dbcsr_create(weighted_dm_ikp_re(1)%matrix, template=bs_env%mat_ao_ao%matrix, &
+      NULLIFY (weighted_dm_MIC)
+      CALL dbcsr_allocate_matrix_set(weighted_dm_MIC, 1)
+      ALLOCATE (weighted_dm_MIC(1)%matrix)
+      CALL dbcsr_create(weighted_dm_MIC(1)%matrix, template=bs_env%mat_ao_ao%matrix, &
                         matrix_type=dbcsr_type_symmetric)
-
-      wkp = 0
-      DO i_x = -bs_env%periodic(1), bs_env%periodic(1)
-         DO i_y = -bs_env%periodic(2), bs_env%periodic(2)
-            DO i_z = -bs_env%periodic(3), bs_env%periodic(3)
-               arg = i_x*bs_env%kpoints_DOS%xkp(1, ikp) + &
-                     i_y*bs_env%kpoints_DOS%xkp(2, ikp) + &
-                     i_z*bs_env%kpoints_DOS%xkp(3, ikp)
-               ! only cosine weight necessary; sine weight will cancel because of R <-> -R
-               wkp = wkp + bs_env%kpoints_DOS%wkp(ikp)*COS(twopi*arg)
-            END DO
-         END DO
-      END DO
 
       DO i_E = 1, n_E
 
-         energy = E_min + i_E*energy_step_ldos
+         energy = E_min + i_E*energy_step
 
          is_any_weight_non_zero = .FALSE.
 
@@ -2193,7 +2165,13 @@ CONTAINS
 
             j_mo = col_indices(j_col)
 
-            weight = wkp*Gaussian(energy - eigenval(j_mo), energy_step_ldos)
+            IF (my_do_spinor) THEN
+               spin_degeneracy = 1.0_dp
+            ELSE
+               spin_degeneracy = bs_env%spin_degeneracy
+            END IF
+
+            weight = Gaussian(energy - eigenval(j_mo), broadening)*spin_degeneracy
 
             cfm_work%local_data(:, j_col) = cfm_mos_ikp%local_data(:, j_col)*weight
 
@@ -2212,28 +2190,39 @@ CONTAINS
                                cfm_mos_ikp, cfm_work, z_zero, cfm_weighted_dm_ikp)
 
             IF (my_do_spinor) THEN
+
+               ! contribution from up,up to fm_non_spinor
                CALL get_cfm_submat(cfm_non_spinor, cfm_weighted_dm_ikp, 1, 1)
-               CALL cp_cfm_to_fm(cfm_non_spinor, fm_non_spinor)
+               CALL cp_fm_set_all(fm_non_spinor, 0.0_dp)
+               CALL MIC_contribution_from_ikp(bs_env, qs_env, fm_non_spinor, &
+                                              cfm_non_spinor, ikp, bs_env%kpoints_DOS, &
+                                              "ORB", bs_env%kpoints_DOS%wkp(ikp))
+
+               ! add contribution from down,down to fm_non_spinor
                CALL get_cfm_submat(cfm_non_spinor, cfm_weighted_dm_ikp, n_mo/2, n_mo/2)
-               CALL cp_cfm_to_fm(cfm_non_spinor, fm_non_spinor_2)
-               CALL cp_fm_scale_and_add(1.0_dp, fm_non_spinor, 1.0_dp, fm_non_spinor_2)
-               CALL copy_fm_to_dbcsr(fm_non_spinor, weighted_dm_ikp_re(1)%matrix, &
+               CALL MIC_contribution_from_ikp(bs_env, qs_env, fm_non_spinor, &
+                                              cfm_non_spinor, ikp, bs_env%kpoints_DOS, &
+                                              "ORB", bs_env%kpoints_DOS%wkp(ikp))
+               CALL copy_fm_to_dbcsr(fm_non_spinor, weighted_dm_MIC(1)%matrix, &
                                      keep_sparsity=.FALSE.)
             ELSE
-               CALL cp_cfm_to_fm(cfm_weighted_dm_ikp, fm_weighted_dm_ikp_re)
-               CALL copy_fm_to_dbcsr(fm_weighted_dm_ikp_re, weighted_dm_ikp_re(1)%matrix, &
+               CALL cp_fm_set_all(fm_weighted_dm_MIC, 0.0_dp)
+               CALL MIC_contribution_from_ikp(bs_env, qs_env, fm_weighted_dm_MIC, &
+                                              cfm_weighted_dm_ikp, ikp, bs_env%kpoints_DOS, &
+                                              "ORB", bs_env%kpoints_DOS%wkp(ikp))
+               CALL copy_fm_to_dbcsr(fm_weighted_dm_MIC, weighted_dm_MIC(1)%matrix, &
                                      keep_sparsity=.FALSE.)
             END IF
 
-            LDOS_3d%cr3d(:, :, :) = 0.0_dp
+            LDOS_3d%array(:, :, :) = 0.0_dp
 
-            CALL calculate_rho_elec(matrix_p_kp=weighted_dm_ikp_re, &
+            CALL calculate_rho_elec(matrix_p_kp=weighted_dm_MIC, &
                                     rho=LDOS_3d, &
                                     rho_gspace=rho_g, &
                                     ks_env=ks_env)
 
             DO i_z = i_z_start, i_z_end
-               LDOS_2d(:, :, i_E) = LDOS_2d(:, :, i_E) + LDOS_3d%cr3d(:, :, i_z)
+               LDOS_2d(:, :, i_E) = LDOS_2d(:, :, i_E) + LDOS_3d%array(:, :, i_z)
             END DO
 
          END IF
@@ -2243,19 +2232,18 @@ CONTAINS
       ! set back nimages
       dft_control%nimages = nimages
 
-      CALL pw_pool_give_back_pw(auxbas_pw_pool, LDOS_3d)
-      CALL pw_pool_give_back_pw(auxbas_pw_pool, rho_g)
+      CALL auxbas_pw_pool%give_back_pw(LDOS_3d)
+      CALL auxbas_pw_pool%give_back_pw(rho_g)
 
       CALL cp_cfm_release(cfm_work)
       CALL cp_cfm_release(cfm_weighted_dm_ikp)
 
-      CALL cp_fm_release(fm_weighted_dm_ikp_re)
+      CALL cp_fm_release(fm_weighted_dm_MIC)
 
-      CALL dbcsr_deallocate_matrix_set(weighted_dm_ikp_re)
+      CALL dbcsr_deallocate_matrix_set(weighted_dm_MIC)
 
       IF (my_do_spinor) THEN
          CALL cp_fm_release(fm_non_spinor)
-         CALL cp_fm_release(fm_non_spinor_2)
       END IF
 
       CALL timestop(handle)
@@ -2268,31 +2256,25 @@ CONTAINS
 !> \param scf_gw ...
 !> \param ikp ...
 !> \param bs_env ...
+!> \param eigenval_spinor_G0W0 ...
 ! **************************************************************************************************
-   SUBROUTINE write_SOC_eigenvalues(eigenval_spinor, scf_gw, ikp, bs_env)
+   SUBROUTINE write_SOC_eigenvalues(eigenval_spinor, scf_gw, ikp, bs_env, eigenval_spinor_G0W0)
 
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:)           :: eigenval_spinor
       CHARACTER(LEN=*)                                   :: scf_gw
       INTEGER                                            :: ikp
       TYPE(post_scf_bandstructure_type), POINTER         :: bs_env
+      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:), OPTIONAL :: eigenval_spinor_G0W0
 
       CHARACTER(LEN=*), PARAMETER :: routineN = 'write_SOC_eigenvalues'
 
       CHARACTER(len=3)                                   :: occ_vir
       CHARACTER(LEN=default_string_length)               :: fname
-      INTEGER                                            :: handle, i_mo, iunit
+      INTEGER                                            :: handle, i_mo, iunit, n_occ_spinor
 
       CALL timeset(routineN, handle)
 
-      IF (ikp < 10) THEN
-         WRITE (fname, "(2A,I1)") TRIM(scf_gw), "+SOC_band_structure_for_kpoint_000", ikp
-      ELSE IF (ikp < 100) THEN
-         WRITE (fname, "(2A,I2)") TRIM(scf_gw), "+SOC_band_structure_for_kpoint_00", ikp
-      ELSE IF (ikp < 1000) THEN
-         WRITE (fname, "(2A,I3)") TRIM(scf_gw), "+SOC_band_structure_for_kpoint_0", ikp
-      ELSE
-         WRITE (fname, "(2A,I4)") TRIM(scf_gw), "+SOC_band_structure_for_kpoint_", ikp
-      END IF
+      CALL get_fname(fname, bs_env, ikp, scf_gw, SOC=.TRUE.)
 
       IF (bs_env%para_env%is_source()) THEN
 
@@ -2302,11 +2284,20 @@ CONTAINS
          WRITE (iunit, "(A10,3F10.4)") "kpoint: ", bs_env%kpoints_DOS%xkp(:, ikp)
          WRITE (iunit, "(A)") " "
 
+         n_occ_spinor = bs_env%n_occ(1) + bs_env%n_occ(bs_env%n_spin)
+
          DO i_mo = 1, SIZE(eigenval_spinor)
-            IF (i_mo .LE. 2*bs_env%n_occ(1)) occ_vir = 'occ'
-            IF (i_mo > 2*bs_env%n_occ(1)) occ_vir = 'vir'
-            WRITE (iunit, "(I5,3A,4F16.3,F17.3)") i_mo, ' (', occ_vir, ') ', &
-               eigenval_spinor(i_mo)*evolt
+            IF (i_mo .LE. n_occ_spinor) occ_vir = 'occ'
+            IF (i_mo > n_occ_spinor) occ_vir = 'vir'
+            IF (PRESENT(eigenval_spinor_G0W0)) THEN
+               ! SCF+SOC and G0W0+SOC eigenvalues
+               WRITE (iunit, "(I5,3A,4F16.3,2F17.3)") i_mo, ' (', occ_vir, ') ', &
+                  eigenval_spinor(i_mo)*evolt, eigenval_spinor_G0W0(i_mo)*evolt
+            ELSE
+               ! SCF+SOC eigenvalues only
+               WRITE (iunit, "(I5,3A,4F16.3,F17.3)") i_mo, ' (', occ_vir, ') ', &
+                  eigenval_spinor(i_mo)*evolt
+            END IF
          END DO
 
          CALL close_file(iunit)
@@ -2316,6 +2307,103 @@ CONTAINS
       CALL timestop(handle)
 
    END SUBROUTINE write_SOC_eigenvalues
+
+! **************************************************************************************************
+!> \brief ...
+!> \param fname ...
+!> \param bs_env ...
+!> \param ikp ...
+!> \param scf_gw ...
+!> \param ispin ...
+!> \param SOC ...
+! **************************************************************************************************
+   SUBROUTINE get_fname(fname, bs_env, ikp, scf_gw, ispin, SOC)
+      CHARACTER(len=default_string_length)               :: fname
+      TYPE(post_scf_bandstructure_type), POINTER         :: bs_env
+      INTEGER                                            :: ikp
+      CHARACTER(len=*)                                   :: scf_gw
+      INTEGER, OPTIONAL                                  :: ispin
+      LOGICAL, OPTIONAL                                  :: SOC
+
+      CHARACTER(LEN=*), PARAMETER                        :: routineN = 'get_fname'
+
+      CHARACTER(len=1)                                   :: digits_ikp
+      CHARACTER(len=default_string_length)               :: core_name
+      INTEGER                                            :: handle, n_zeros
+      LOGICAL                                            :: my_SOC
+
+      CALL timeset(routineN, handle)
+
+      my_SOC = .FALSE.
+      IF (PRESENT(SOC)) my_SOC = SOC
+
+      n_zeros = count_digits(bs_env%kpoints_DOS%nkp) - count_digits(ikp)
+
+      WRITE (digits_ikp, '(I1)') count_digits(ikp)
+
+      IF (bs_env%kpoints_DOS%nkp == 1) THEN
+         ! for molecules
+         core_name = TRIM(scf_gw)//"_eigenvalues"
+      ELSE
+         ! for periodic systems
+         core_name = TRIM(scf_gw)//"_band_struct_kp"
+      END IF
+
+      SELECT CASE (n_zeros)
+      CASE (0)
+         WRITE (fname, "(2A,I"//digits_ikp//")") TRIM(core_name), "_", ikp
+      CASE (1)
+         WRITE (fname, "(2A,I"//digits_ikp//")") TRIM(core_name), "_0", ikp
+      CASE (2)
+         WRITE (fname, "(2A,I"//digits_ikp//")") TRIM(core_name), "_00", ikp
+      CASE (3)
+         WRITE (fname, "(2A,I"//digits_ikp//")") TRIM(core_name), "_000", ikp
+      CASE DEFAULT
+         CPABORT("Too many zeros.")
+      END SELECT
+
+      ! for molecules, we don't have any k-points; overwrite fname
+      IF (ikp == 1 .AND. bs_env%kpoints_DOS%nkp == 1) THEN
+         WRITE (fname, "(A)") TRIM(core_name)
+      END IF
+
+      IF (my_SOC) THEN
+         WRITE (fname, "(2A)") TRIM(fname), "_+_SOC"
+      END IF
+
+      IF (bs_env%n_spin == 2 .AND. .NOT. my_SOC) THEN
+         CPASSERT(PRESENT(ispin))
+         WRITE (fname, "(2A,I1)") TRIM(fname), "_spin_", ispin
+      END IF
+
+      CALL timestop(handle)
+
+   END SUBROUTINE get_fname
+
+! **************************************************************************************************
+!> \brief ...
+!> \param int_number ...
+!> \return ...
+! **************************************************************************************************
+   PURE FUNCTION count_digits(int_number)
+
+      INTEGER, INTENT(IN)                                :: int_number
+      INTEGER                                            :: count_digits
+
+      INTEGER                                            :: digitCount, tempInt
+
+      digitCount = 0
+
+      tempInt = int_number
+
+      DO WHILE (tempInt /= 0)
+         tempInt = tempInt/10
+         digitCount = digitCount + 1
+      END DO
+
+      count_digits = digitCount
+
+   END FUNCTION count_digits
 
 ! **************************************************************************************************
 !> \brief ...
@@ -2401,7 +2489,7 @@ CONTAINS
 
          WRITE (output_string, "(A,I1,A)") "(", n_A, "A)"
 
-         WRITE (iunit, TRIM(output_string)) "Energy (eV)    DOS (1/eV)    PDOS (1/eV) ", &
+         WRITE (iunit, TRIM(output_string)) "Energy-E_F (eV)    DOS (1/eV)    PDOS (1/eV) ", &
             " of atom type ", elements(1:nkind)
 
          WRITE (output_string, "(A,I1,A)") "(", n_A, "F13.5)"
@@ -2431,8 +2519,8 @@ CONTAINS
       REAL(KIND=dp), INTENT(IN)                          :: energy, broadening
       REAL(KIND=dp)                                      :: Gaussian
 
-      IF (energy < 5*broadening) THEN
-         Gaussian = 1/broadening/SQRT(twopi)*EXP(-energy**2/broadening**2)
+      IF (ABS(energy) < 5*broadening) THEN
+         Gaussian = 1.0_dp/broadening/SQRT(twopi)*EXP(-0.5_dp*energy**2/broadening**2)
       ELSE
          Gaussian = 0.0_dp
       END IF
@@ -2729,5 +2817,123 @@ CONTAINS
       CALL timestop(handle)
 
    END SUBROUTINE cfm_ikp_from_fm_Gamma
+
+! **************************************************************************************************
+!> \brief ...
+!> \param bs_env ...
+!> \param qs_env ...
+!> \param fm_W_MIC_freq_j ...
+!> \param cfm_W_ikp_freq_j ...
+!> \param ikp ...
+!> \param kpoints ...
+!> \param basis_type ...
+!> \param wkp_ext ...
+! **************************************************************************************************
+   SUBROUTINE MIC_contribution_from_ikp(bs_env, qs_env, fm_W_MIC_freq_j, &
+                                        cfm_W_ikp_freq_j, ikp, kpoints, basis_type, wkp_ext)
+      TYPE(post_scf_bandstructure_type), POINTER         :: bs_env
+      TYPE(qs_environment_type), POINTER                 :: qs_env
+      TYPE(cp_fm_type)                                   :: fm_W_MIC_freq_j
+      TYPE(cp_cfm_type)                                  :: cfm_W_ikp_freq_j
+      INTEGER                                            :: ikp
+      TYPE(kpoint_type), POINTER                         :: kpoints
+      CHARACTER(LEN=*)                                   :: basis_type
+      REAL(KIND=dp), OPTIONAL                            :: wkp_ext
+
+      CHARACTER(LEN=*), PARAMETER :: routineN = 'MIC_contribution_from_ikp'
+
+      INTEGER                                            :: handle, i_bf, iatom, iatom_old, irow, &
+                                                            j_bf, jatom, jatom_old, jcol, n_bf, &
+                                                            ncol_local, nrow_local, num_cells
+      INTEGER, ALLOCATABLE, DIMENSION(:)                 :: atom_from_bf_index
+      INTEGER, DIMENSION(:), POINTER                     :: col_indices, row_indices
+      INTEGER, DIMENSION(:, :), POINTER                  :: index_to_cell
+      REAL(KIND=dp)                                      :: contribution, weight_im, weight_re, &
+                                                            wkp_of_ikp
+      REAL(KIND=dp), DIMENSION(3, 3)                     :: hmat
+      REAL(KIND=dp), DIMENSION(:), POINTER               :: wkp
+      REAL(KIND=dp), DIMENSION(:, :), POINTER            :: xkp
+      TYPE(cell_type), POINTER                           :: cell
+      TYPE(particle_type), DIMENSION(:), POINTER         :: particle_set
+
+      CALL timeset(routineN, handle)
+
+      ! get number of basis functions (bf) for different basis sets
+      IF (basis_type == "ORB") THEN
+         n_bf = qs_env%bs_env%n_ao
+      ELSE IF (basis_type == "RI_AUX") THEN
+         n_bf = qs_env%bs_env%n_RI
+      ELSE
+         CPABORT("Only ORB and RI_AUX basis implemented.")
+      END IF
+
+      ALLOCATE (atom_from_bf_index(n_bf))
+      CALL get_atom_index_from_basis_function_index(qs_env, atom_from_bf_index, n_bf, basis_type)
+
+      NULLIFY (cell, particle_set)
+      CALL get_qs_env(qs_env, cell=cell, particle_set=particle_set)
+      CALL get_cell(cell=cell, h=hmat)
+
+      CALL cp_cfm_get_info(matrix=cfm_W_ikp_freq_j, &
+                           nrow_local=nrow_local, &
+                           ncol_local=ncol_local, &
+                           row_indices=row_indices, &
+                           col_indices=col_indices)
+
+      CALL get_kpoint_info(kpoints, xkp=xkp, wkp=wkp)
+      index_to_cell => kpoints%index_to_cell
+      num_cells = SIZE(index_to_cell, 2)
+
+      iatom_old = 0
+      jatom_old = 0
+
+      DO irow = 1, nrow_local
+         DO jcol = 1, ncol_local
+
+            i_bf = row_indices(irow)
+            j_bf = col_indices(jcol)
+
+            iatom = atom_from_bf_index(i_bf)
+            jatom = atom_from_bf_index(j_bf)
+
+            IF (PRESENT(wkp_ext)) THEN
+               wkp_of_ikp = wkp_ext
+            ELSE
+               SELECT CASE (bs_env%l_RI(i_bf) + bs_env%l_RI(j_bf))
+               CASE (0)
+                  ! both RI functions are s-functions, k-extrapolation for 2D and 3D
+                  wkp_of_ikp = wkp(ikp)
+               CASE (1)
+                  ! one function is an s-function, the other a p-function, k-extrapolation for 3D
+                  wkp_of_ikp = bs_env%wkp_s_p(ikp)
+               CASE DEFAULT
+                  ! for any other matrix element of W, there is no need for extrapolation
+                  wkp_of_ikp = bs_env%wkp_no_extra(ikp)
+               END SELECT
+            END IF
+
+            IF (iatom .NE. iatom_old .OR. jatom .NE. jatom_old) THEN
+
+               CALL compute_weight_re_im(weight_re, weight_im, &
+                                         num_cells, iatom, jatom, xkp(1:3, ikp), wkp_of_ikp, &
+                                         cell, index_to_cell, hmat, particle_set)
+
+               iatom_old = iatom
+               jatom_old = jatom
+
+            END IF
+
+            contribution = weight_re*REAL(cfm_W_ikp_freq_j%local_data(irow, jcol)) + &
+                           weight_im*AIMAG(cfm_W_ikp_freq_j%local_data(irow, jcol))
+
+            fm_W_MIC_freq_j%local_data(irow, jcol) = fm_W_MIC_freq_j%local_data(irow, jcol) &
+                                                     + contribution
+
+         END DO
+      END DO
+
+      CALL timestop(handle)
+
+   END SUBROUTINE MIC_contribution_from_ikp
 
 END MODULE post_scf_bandstructure_utils

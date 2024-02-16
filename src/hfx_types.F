@@ -1,6 +1,6 @@
 !--------------------------------------------------------------------------------------------------!
 !   CP2K: A general program to perform molecular dynamics simulations                              !
-!   Copyright 2000-2023 CP2K developers group <https://cp2k.org>                                   !
+!   Copyright 2000-2024 CP2K developers group <https://cp2k.org>                                   !
 !                                                                                                  !
 !   SPDX-License-Identifier: GPL-2.0-or-later                                                      !
 !--------------------------------------------------------------------------------------------------!
@@ -19,7 +19,8 @@ MODULE hfx_types
    USE basis_set_types,                 ONLY: get_gto_basis_set,&
                                               gto_basis_set_p_type,&
                                               gto_basis_set_type
-   USE bibliography,                    ONLY: cite_reference,&
+   USE bibliography,                    ONLY: bussy2023,&
+                                              cite_reference,&
                                               guidon2008,&
                                               guidon2009
    USE cell_types,                      ONLY: cell_type,&
@@ -604,7 +605,7 @@ CONTAINS
       INTEGER :: handle, i, i_thread, iatom, ikind, int_val, irep, jkind, max_set, n_rep_hf, &
          n_threads, natom, natom_a, natom_b, nkind, nseta, nsetb, pbc_shells, storage_id
       INTEGER, ALLOCATABLE, DIMENSION(:)                 :: atom2kind, kind_of
-      LOGICAL                                            :: do_ri, logic_val, my_do_exx
+      LOGICAL                                            :: do_ri, explicit, logic_val, my_do_exx
       REAL(dp)                                           :: real_val
       TYPE(hfx_type), POINTER                            :: actual_x_data
       TYPE(section_vals_type), POINTER                   :: hf_pbc_section, hf_sub_section, &
@@ -665,8 +666,13 @@ CONTAINS
             hf_sub_section => section_vals_get_subs_vals(hfx_section, "SCREENING", i_rep_section=irep)
             CALL section_vals_val_get(hf_sub_section, "EPS_SCHWARZ", r_val=real_val)
             actual_x_data%screening_parameter%eps_schwarz = real_val
-            CALL section_vals_val_get(hf_sub_section, "EPS_SCHWARZ_FORCES", r_val=real_val)
-            actual_x_data%screening_parameter%eps_schwarz_forces = real_val
+            CALL section_vals_val_get(hf_sub_section, "EPS_SCHWARZ_FORCES", r_val=real_val, explicit=explicit)
+            IF (explicit) THEN
+               actual_x_data%screening_parameter%eps_schwarz_forces = real_val
+            ELSE
+               actual_x_data%screening_parameter%eps_schwarz_forces = &
+                  100._dp*actual_x_data%screening_parameter%eps_schwarz
+            END IF
             CALL section_vals_val_get(hf_sub_section, "SCREEN_P_FORCES", l_val=logic_val)
             actual_x_data%screening_parameter%do_p_screening_forces = logic_val
             CALL section_vals_val_get(hf_sub_section, "SCREEN_ON_INITIAL_P", l_val=logic_val)
@@ -1210,6 +1216,8 @@ CONTAINS
       TYPE(gto_basis_set_p_type), ALLOCATABLE, &
          DIMENSION(:)                                    :: basis_set_AO, basis_set_RI
       TYPE(mp_cart_type)                                 :: mp_comm_3d
+
+      CALL cite_reference(Bussy2023)
 
       CALL timeset(routineN, handle)
 

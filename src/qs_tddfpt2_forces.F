@@ -1,6 +1,6 @@
 !--------------------------------------------------------------------------------------------------!
 !   CP2K: A general program to perform molecular dynamics simulations                              !
-!   Copyright 2000-2023 CP2K developers group <https://cp2k.org>                                   !
+!   Copyright 2000-2024 CP2K developers group <https://cp2k.org>                                   !
 !                                                                                                  !
 !   SPDX-License-Identifier: GPL-2.0-or-later                                                      !
 !--------------------------------------------------------------------------------------------------!
@@ -69,14 +69,9 @@ MODULE qs_tddfpt2_forces
                                               pw_zero
    USE pw_poisson_methods,              ONLY: pw_poisson_solve
    USE pw_poisson_types,                ONLY: pw_poisson_type
-   USE pw_pool_types,                   ONLY: pw_pool_create_pw,&
-                                              pw_pool_give_back_pw,&
-                                              pw_pool_type
-   USE pw_types,                        ONLY: COMPLEXDATA1D,&
-                                              REALDATA3D,&
-                                              REALSPACE,&
-                                              RECIPROCALSPACE,&
-                                              pw_type
+   USE pw_pool_types,                   ONLY: pw_pool_type
+   USE pw_types,                        ONLY: pw_c1d_gs_type,&
+                                              pw_r3d_rs_type
    USE qs_collocate_density,            ONLY: calculate_rho_elec
    USE qs_density_matrices,             ONLY: calculate_wx_matrix,&
                                               calculate_xwx_matrix
@@ -677,15 +672,15 @@ CONTAINS
       TYPE(neighbor_list_set_p_type), DIMENSION(:), &
          POINTER                                         :: sab, sab_aux_fit
       TYPE(oce_matrix_type), POINTER                     :: oce
+      TYPE(pw_c1d_gs_type)                               :: rho_tot_gspace, v_hartree_gspace
+      TYPE(pw_c1d_gs_type), DIMENSION(:), POINTER        :: rho_g, rho_g_aux, rhoz_g_aux, trho_g, &
+                                                            trho_xc_g
       TYPE(pw_env_type), POINTER                         :: pw_env
       TYPE(pw_poisson_type), POINTER                     :: poisson_env
       TYPE(pw_pool_type), POINTER                        :: auxbas_pw_pool
-      TYPE(pw_type)                                      :: rho_tot_gspace, v_hartree_gspace, &
-                                                            v_hartree_rspace
-      TYPE(pw_type), DIMENSION(:), POINTER               :: rho_g, rho_g_aux, rho_r, rho_r_aux, &
-                                                            rhoz_g_aux, rhoz_r_aux, tau_r, trho_g, &
-                                                            trho_r, trho_xc_g, trho_xc_r, v_xc, &
-                                                            v_xc_tau
+      TYPE(pw_r3d_rs_type)                               :: v_hartree_rspace
+      TYPE(pw_r3d_rs_type), DIMENSION(:), POINTER        :: rho_r, rho_r_aux, rhoz_r_aux, tau_r, &
+                                                            trho_r, trho_xc_r, v_xc, v_xc_tau
       TYPE(qs_kind_type), DIMENSION(:), POINTER          :: qs_kind_set
       TYPE(qs_ks_env_type), POINTER                      :: ks_env
       TYPE(qs_rho_type), POINTER                         :: rho, rho_aux_fit, rho_xc, rhoz_aux, trho
@@ -708,27 +703,20 @@ CONTAINS
       CALL pw_env_get(pw_env, auxbas_pw_pool=auxbas_pw_pool, &
                       poisson_env=poisson_env)
 
-      CALL pw_pool_create_pw(auxbas_pw_pool, v_hartree_gspace, &
-                             use_data=COMPLEXDATA1D, in_space=RECIPROCALSPACE)
-      CALL pw_pool_create_pw(auxbas_pw_pool, rho_tot_gspace, &
-                             use_data=COMPLEXDATA1D, in_space=RECIPROCALSPACE)
-      CALL pw_pool_create_pw(auxbas_pw_pool, v_hartree_rspace, &
-                             use_data=REALDATA3D, in_space=REALSPACE)
+      CALL auxbas_pw_pool%create_pw(v_hartree_gspace)
+      CALL auxbas_pw_pool%create_pw(rho_tot_gspace)
+      CALL auxbas_pw_pool%create_pw(v_hartree_rspace)
 
       ALLOCATE (trho_r(nspins), trho_g(nspins))
       DO ispin = 1, nspins
-         CALL pw_pool_create_pw(auxbas_pw_pool, trho_r(ispin), &
-                                use_data=REALDATA3D, in_space=REALSPACE)
-         CALL pw_pool_create_pw(auxbas_pw_pool, trho_g(ispin), &
-                                use_data=COMPLEXDATA1D, in_space=RECIPROCALSPACE)
+         CALL auxbas_pw_pool%create_pw(trho_r(ispin))
+         CALL auxbas_pw_pool%create_pw(trho_g(ispin))
       END DO
       IF (gapw_xc) THEN
          ALLOCATE (trho_xc_r(nspins), trho_xc_g(nspins))
          DO ispin = 1, nspins
-            CALL pw_pool_create_pw(auxbas_pw_pool, trho_xc_r(ispin), &
-                                   use_data=REALDATA3D, in_space=REALSPACE)
-            CALL pw_pool_create_pw(auxbas_pw_pool, trho_xc_g(ispin), &
-                                   use_data=COMPLEXDATA1D, in_space=RECIPROCALSPACE)
+            CALL auxbas_pw_pool%create_pw(trho_xc_r(ispin))
+            CALL auxbas_pw_pool%create_pw(trho_xc_g(ispin))
          END DO
       END IF
 
@@ -883,25 +871,25 @@ CONTAINS
                              rho_atom_external=local_rho_set%rho_atom_set)
       END IF
 
-      CALL pw_pool_give_back_pw(auxbas_pw_pool, v_hartree_gspace)
-      CALL pw_pool_give_back_pw(auxbas_pw_pool, v_hartree_rspace)
-      CALL pw_pool_give_back_pw(auxbas_pw_pool, rho_tot_gspace)
+      CALL auxbas_pw_pool%give_back_pw(v_hartree_gspace)
+      CALL auxbas_pw_pool%give_back_pw(v_hartree_rspace)
+      CALL auxbas_pw_pool%give_back_pw(rho_tot_gspace)
       DO ispin = 1, nspins
-         CALL pw_pool_give_back_pw(auxbas_pw_pool, trho_r(ispin))
-         CALL pw_pool_give_back_pw(auxbas_pw_pool, trho_g(ispin))
-         CALL pw_pool_give_back_pw(auxbas_pw_pool, v_xc(ispin))
+         CALL auxbas_pw_pool%give_back_pw(trho_r(ispin))
+         CALL auxbas_pw_pool%give_back_pw(trho_g(ispin))
+         CALL auxbas_pw_pool%give_back_pw(v_xc(ispin))
       END DO
       DEALLOCATE (trho_r, trho_g, v_xc)
       IF (gapw_xc) THEN
          DO ispin = 1, nspins
-            CALL pw_pool_give_back_pw(auxbas_pw_pool, trho_xc_r(ispin))
-            CALL pw_pool_give_back_pw(auxbas_pw_pool, trho_xc_g(ispin))
+            CALL auxbas_pw_pool%give_back_pw(trho_xc_r(ispin))
+            CALL auxbas_pw_pool%give_back_pw(trho_xc_g(ispin))
          END DO
          DEALLOCATE (trho_xc_r, trho_xc_g)
       END IF
       IF (ASSOCIATED(v_xc_tau)) THEN
          DO ispin = 1, nspins
-            CALL pw_pool_give_back_pw(auxbas_pw_pool, v_xc_tau(ispin))
+            CALL auxbas_pw_pool%give_back_pw(v_xc_tau(ispin))
          END DO
          DEALLOCATE (v_xc_tau)
       END IF
@@ -951,10 +939,8 @@ CONTAINS
             ! rhoz_aux
             ALLOCATE (rhoz_r_aux(nspins), rhoz_g_aux(nspins))
             DO ispin = 1, nspins
-               CALL pw_pool_create_pw(auxbas_pw_pool, rhoz_r_aux(ispin), &
-                                      use_data=REALDATA3D, in_space=REALSPACE)
-               CALL pw_pool_create_pw(auxbas_pw_pool, rhoz_g_aux(ispin), &
-                                      use_data=COMPLEXDATA1D, in_space=RECIPROCALSPACE)
+               CALL auxbas_pw_pool%create_pw(rhoz_r_aux(ispin))
+               CALL auxbas_pw_pool%create_pw(rhoz_g_aux(ispin))
             END DO
             DO ispin = 1, nspins
                CALL calculate_rho_elec(ks_env=ks_env, matrix_p=mpe(ispin, 1)%matrix, &
@@ -986,9 +972,9 @@ CONTAINS
                                        task_list_external=task_list)
             END DO
             DO ispin = 1, nspins
-               CALL pw_pool_give_back_pw(auxbas_pw_pool, v_xc(ispin))
-               CALL pw_pool_give_back_pw(auxbas_pw_pool, rhoz_r_aux(ispin))
-               CALL pw_pool_give_back_pw(auxbas_pw_pool, rhoz_g_aux(ispin))
+               CALL auxbas_pw_pool%give_back_pw(v_xc(ispin))
+               CALL auxbas_pw_pool%give_back_pw(rhoz_r_aux(ispin))
+               CALL auxbas_pw_pool%give_back_pw(rhoz_g_aux(ispin))
             END DO
             DEALLOCATE (v_xc, rhoz_r_aux, rhoz_g_aux)
             !

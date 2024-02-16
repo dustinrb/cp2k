@@ -1,6 +1,6 @@
 !--------------------------------------------------------------------------------------------------!
 !   CP2K: A general program to perform molecular dynamics simulations                              !
-!   Copyright 2000-2023 CP2K developers group <https://cp2k.org>                                   !
+!   Copyright 2000-2024 CP2K developers group <https://cp2k.org>                                   !
 !                                                                                                  !
 !   SPDX-License-Identifier: GPL-2.0-or-later                                                      !
 !--------------------------------------------------------------------------------------------------!
@@ -39,7 +39,11 @@ MODULE fftw3_lib
    PUBLIC :: fftw_alloc, fftw_dealloc
 
 #if defined ( __FFTW3 )
+#if defined ( __FFTW3_MKL )
+#include "fftw/fftw3.f03"
+#else
 #include "fftw3.f03"
+#endif
 #endif
 
    INTERFACE fftw_alloc

@@ -1,6 +1,6 @@
 !--------------------------------------------------------------------------------------------------!
 !   CP2K: A general program to perform molecular dynamics simulations                              !
-!   Copyright 2000-2023 CP2K developers group <https://cp2k.org>                                   !
+!   Copyright 2000-2024 CP2K developers group <https://cp2k.org>                                   !
 !                                                                                                  !
 !   SPDX-License-Identifier: GPL-2.0-or-later                                                      !
 !--------------------------------------------------------------------------------------------------!
@@ -44,6 +44,7 @@ MODULE iao_analysis
                                               cp_fm_struct_release,&
                                               cp_fm_struct_type
    USE cp_fm_types,                     ONLY: cp_fm_create,&
+                                              cp_fm_get_diag,&
                                               cp_fm_get_element,&
                                               cp_fm_get_info,&
                                               cp_fm_release,&
@@ -71,6 +72,7 @@ MODULE iao_analysis
    USE kinds,                           ONLY: default_path_length,&
                                               default_string_length,&
                                               dp
+   USE machine,                         ONLY: m_walltime
    USE mathconstants,                   ONLY: twopi
    USE mathlib,                         ONLY: invmat_symm,&
                                               jacobi
@@ -84,14 +86,9 @@ MODULE iao_analysis
    USE particle_types,                  ONLY: particle_type
    USE pw_env_types,                    ONLY: pw_env_get,&
                                               pw_env_type
-   USE pw_pool_types,                   ONLY: pw_pool_create_pw,&
-                                              pw_pool_give_back_pw,&
-                                              pw_pool_type
-   USE pw_types,                        ONLY: COMPLEXDATA1D,&
-                                              REALDATA3D,&
-                                              REALSPACE,&
-                                              RECIPROCALSPACE,&
-                                              pw_type
+   USE pw_pool_types,                   ONLY: pw_pool_type
+   USE pw_types,                        ONLY: pw_c1d_gs_type,&
+                                              pw_r3d_rs_type
    USE qs_collocate_density,            ONLY: calculate_wavefunction
    USE qs_environment_types,            ONLY: get_qs_env,&
                                               qs_environment_type
@@ -160,12 +157,13 @@ CONTAINS
       CHARACTER(LEN=default_string_length)               :: bname
       INTEGER                                            :: handle, i, iatom, ikind, isgf, ispin, &
                                                             nao, natom, nimages, nkind, no, norb, &
-                                                            nref, ns, nsgf, nspin, nvec, nx
+                                                            nref, ns, nsgf, nspin, nvec, nx, order
       INTEGER, ALLOCATABLE, DIMENSION(:)                 :: first_sgf, last_sgf, nsgfat
       INTEGER, DIMENSION(2)                              :: nocc
       LOGICAL                                            :: cubes_iao, cubes_ibo, molden_iao, &
                                                             molden_ibo, uniform_occupation
-      REAL(KIND=dp)                                      :: trace, zval
+      REAL(KIND=dp)                                      :: fin, fout, t1, t2, trace, zval
+      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:)           :: fdiag
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :)        :: mcharge
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :, :)     :: moments
       REAL(KIND=dp), DIMENSION(:), POINTER               :: occupation_numbers
@@ -549,9 +547,7 @@ CONTAINS
          DO ispin = 1, nspin
             nvec = nocc(ispin)
             IF (nvec > 0) THEN
-               ! QR localization
-               CALL scdm_qrfact(cloc(ispin))
-               ALLOCATE (zij_atom(natom, 1))
+               ALLOCATE (zij_atom(natom, 1), fdiag(nvec))
                NULLIFY (fm_struct)
                CALL cp_fm_struct_create(fm_struct, nrow_global=nvec, ncol_global=nvec, &
                                         template_fmstruct=cloc(ispin)%matrix_struct)
@@ -564,7 +560,37 @@ CONTAINS
                END DO
                CALL cp_fm_struct_release(fm_struct)
                !
-               CALL pm_localization(zij_atom, cloc(ispin), 4, 1.E-12_dp, unit_nr)
+               t1 = m_walltime()
+               order = 4
+               fin = 0.0_dp
+               DO iatom = 1, natom
+                  CALL cp_fm_get_diag(zij_atom(iatom, 1), fdiag)
+                  fin = fin + SUM(fdiag**order)
+               END DO
+               fin = fin**(1._dp/order)
+               ! QR localization
+               CALL scdm_qrfact(cloc(ispin))
+               !
+               DO iatom = 1, natom
+                  isgf = first_sgf(iatom)
+                  CALL parallel_gemm('T', 'N', nvec, nvec, nsgfat(iatom), 1.0_dp, cloc(ispin), cloc(ispin), &
+                                     0.0_dp, zij_atom(iatom, 1), &
+                                     a_first_col=1, a_first_row=isgf, b_first_col=1, b_first_row=isgf)
+               END DO
+               fout = 0.0_dp
+               DO iatom = 1, natom
+                  CALL cp_fm_get_diag(zij_atom(iatom, 1), fdiag)
+                  fout = fout + SUM(fdiag**order)
+               END DO
+               fout = fout**(1._dp/order)
+               DEALLOCATE (fdiag)
+               t2 = m_walltime()
+               IF (unit_nr > 0) THEN
+                  WRITE (unit_nr, '(T2,A,F14.8,A,F14.8,A,F8.2)') &
+                     'SCDM pre-localization: fin=', fin, "  fout=", fout, "    Time=", t2 - t1
+               END IF
+               !
+               CALL pm_localization(zij_atom, cloc(ispin), order, 1.E-12_dp, unit_nr)
                !
                CALL cp_fm_release(zij_atom)
                CALL get_mo_set(my_mos(ispin), nao=nao)
@@ -967,9 +993,10 @@ CONTAINS
       TYPE(dft_control_type), POINTER                    :: dft_control
       TYPE(particle_list_type), POINTER                  :: particles
       TYPE(particle_type), DIMENSION(:), POINTER         :: particle_set
+      TYPE(pw_c1d_gs_type)                               :: wf_g
       TYPE(pw_env_type), POINTER                         :: pw_env
       TYPE(pw_pool_type), POINTER                        :: auxbas_pw_pool
-      TYPE(pw_type)                                      :: wf_g, wf_r
+      TYPE(pw_r3d_rs_type)                               :: wf_r
       TYPE(qs_kind_type), DIMENSION(:), POINTER          :: qs_kind_set
       TYPE(qs_subsys_type), POINTER                      :: subsys
 
@@ -990,8 +1017,8 @@ CONTAINS
       END DO
 
       CALL pw_env_get(pw_env, auxbas_pw_pool=auxbas_pw_pool)
-      CALL pw_pool_create_pw(auxbas_pw_pool, wf_r, use_data=REALDATA3D, in_space=REALSPACE)
-      CALL pw_pool_create_pw(auxbas_pw_pool, wf_g, use_data=COMPLEXDATA1D, in_space=RECIPROCALSPACE)
+      CALL auxbas_pw_pool%create_pw(wf_r)
+      CALL auxbas_pw_pool%create_pw(wf_g)
 
       nspins = SIZE(iao_coef)
       nstart = MIN(1, n_rep)
@@ -1028,8 +1055,8 @@ CONTAINS
          END DO
       END DO
       DEALLOCATE (blk_sizes, first_bas)
-      CALL pw_pool_give_back_pw(auxbas_pw_pool, wf_r)
-      CALL pw_pool_give_back_pw(auxbas_pw_pool, wf_g)
+      CALL auxbas_pw_pool%give_back_pw(wf_r)
+      CALL auxbas_pw_pool%give_back_pw(wf_g)
 
    END SUBROUTINE print_iao_cubes
 
@@ -1055,9 +1082,10 @@ CONTAINS
       TYPE(dft_control_type), POINTER                    :: dft_control
       TYPE(particle_list_type), POINTER                  :: particles
       TYPE(particle_type), DIMENSION(:), POINTER         :: particle_set
+      TYPE(pw_c1d_gs_type)                               :: wf_g
       TYPE(pw_env_type), POINTER                         :: pw_env
       TYPE(pw_pool_type), POINTER                        :: auxbas_pw_pool
-      TYPE(pw_type)                                      :: wf_g, wf_r
+      TYPE(pw_r3d_rs_type)                               :: wf_r
       TYPE(qs_kind_type), DIMENSION(:), POINTER          :: qs_kind_set
       TYPE(qs_subsys_type), POINTER                      :: subsys
 
@@ -1072,8 +1100,8 @@ CONTAINS
       CALL qs_subsys_get(subsys, particles=particles)
 
       CALL pw_env_get(pw_env, auxbas_pw_pool=auxbas_pw_pool)
-      CALL pw_pool_create_pw(auxbas_pw_pool, wf_r, use_data=REALDATA3D, in_space=REALSPACE)
-      CALL pw_pool_create_pw(auxbas_pw_pool, wf_g, use_data=COMPLEXDATA1D, in_space=RECIPROCALSPACE)
+      CALL auxbas_pw_pool%create_pw(wf_r)
+      CALL auxbas_pw_pool%create_pw(wf_g)
 
       nspins = SIZE(ibo_coef)
       nstart = MIN(1, n_rep)
@@ -1108,8 +1136,8 @@ CONTAINS
          END DO
       END DO
 
-      CALL pw_pool_give_back_pw(auxbas_pw_pool, wf_r)
-      CALL pw_pool_give_back_pw(auxbas_pw_pool, wf_g)
+      CALL auxbas_pw_pool%give_back_pw(wf_r)
+      CALL auxbas_pw_pool%give_back_pw(wf_g)
 
    END SUBROUTINE print_ibo_cubes
 
@@ -1630,21 +1658,25 @@ CONTAINS
       INTEGER                                            :: iatom, istate, jstate, natom, nstate, &
                                                             sweeps
       REAL(KIND=dp)                                      :: aij, bij, ct, ftarget, mii, mij, mjj, &
-                                                            st, theta, tolerance
+                                                            st, t1, t2, theta, tolerance, tt
+      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:)           :: fdiag
       TYPE(cp_fm_type)                                   :: rmat
 
       CALL cp_fm_create(rmat, zij_fm_set(1, 1)%matrix_struct)
       CALL cp_fm_set_all(rmat, 0.0_dp, 1.0_dp)
 
       CALL cp_fm_get_info(rmat, nrow_global=nstate)
+      ALLOCATE (fdiag(nstate))
       tolerance = 1.0e10_dp
       sweeps = 0
       natom = SIZE(zij_fm_set, 1)
       IF (unit_nr > 0) THEN
-         WRITE (unit_nr, '(A,T35,A,T50,A,T73,A)') " Jacobi Localization  ", "Sweep", "Functional", "Gradient"
+         WRITE (unit_nr, '(A,T30,A,T45,A,T63,A,T77,A)') &
+            " Jacobi Localization  ", "Sweep", "Functional", "Gradient", "Time"
       END IF
       ! do jacobi sweeps until converged
       DO sweeps = 1, max_sweeps
+         t1 = m_walltime()
          tolerance = 0.0_dp
          DO istate = 1, nstate
             DO jstate = istate + 1, nstate
@@ -1680,19 +1712,20 @@ CONTAINS
             END DO
          END DO
          ftarget = 0.0_dp
-         DO istate = 1, nstate
-            DO iatom = 1, natom
-               CALL cp_fm_get_element(zij_fm_set(iatom, 1), istate, istate, mii)
-               ftarget = ftarget + mii**order
-            END DO
+         DO iatom = 1, natom
+            CALL cp_fm_get_diag(zij_fm_set(iatom, 1), fdiag)
+            ftarget = ftarget + SUM(fdiag**order)
          END DO
          ftarget = ftarget**(1._dp/order)
          tolerance = SQRT(tolerance)
+         t2 = m_walltime()
+         tt = t2 - t1
          IF (unit_nr > 0) THEN
-            WRITE (unit_nr, '(T36,I4,T44,F16.8,T65,G16.8)') sweeps, ftarget, tolerance
+            WRITE (unit_nr, '(T31,I4,T39,F16.8,T55,G16.8,T71,F10.2)') sweeps, ftarget, tolerance, tt
          END IF
          IF (tolerance < accuracy) EXIT
       END DO
+      DEALLOCATE (fdiag)
 
       CALL rotate_orbitals(rmat, vectors)
       CALL cp_fm_release(rmat)

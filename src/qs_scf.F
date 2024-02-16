@@ -1,6 +1,6 @@
 !--------------------------------------------------------------------------------------------------!
 !   CP2K: A general program to perform molecular dynamics simulations                              !
-!   Copyright 2000-2023 CP2K developers group <https://cp2k.org>                                   !
+!   Copyright 2000-2024 CP2K developers group <https://cp2k.org>                                   !
 !                                                                                                  !
 !   SPDX-License-Identifier: GPL-2.0-or-later                                                      !
 !--------------------------------------------------------------------------------------------------!
@@ -101,8 +101,7 @@ MODULE qs_scf
                                               restart_preconditioner
    USE pw_env_types,                    ONLY: pw_env_get,&
                                               pw_env_type
-   USE pw_pool_types,                   ONLY: pw_pool_give_back_pw,&
-                                              pw_pool_type
+   USE pw_pool_types,                   ONLY: pw_pool_type
    USE qs_block_davidson_types,         ONLY: block_davidson_deallocate
    USE qs_cdft_scf_utils,               ONLY: build_diagonal_jacobian,&
                                               create_tmp_logger,&
@@ -599,11 +598,14 @@ CONTAINS
          dft_control%qs_control%cdft_control%total_steps = &
          dft_control%qs_control%cdft_control%total_steps + total_steps
 
-      IF (.NOT. converged) CPWARN("SCF run NOT converged")
-
-      IF (.NOT. converged .AND. scf_control%stop_higher_iter_level) THEN
-         logger%iter_info%last_iter(logger%iter_info%n_rlevel - 1) = .TRUE.
-         CPWARN("MD iteration also stops")
+      IF (.NOT. converged) THEN
+         IF (scf_control%ignore_convergence_failure .OR. should_stop) THEN
+            CALL cp_warn(__LOCATION__, "SCF run NOT converged")
+         ELSE
+            CALL cp_abort(__LOCATION__, &
+                          "SCF run NOT converged. To continue the calculation "// &
+                          "regardless, please set the keyword IGNORE_CONVERGENCE_FAILURE.")
+         END IF
       END IF
 
       ! Skip Harris functional calculation if ground-state is NOT converged
@@ -1163,25 +1165,25 @@ CONTAINS
          CALL get_qs_env(qs_env, pw_env=pw_env)
          CALL pw_env_get(pw_env, auxbas_pw_pool=auxbas_pw_pool)
          DO iatom = 1, SIZE(cdft_control%group)
-            CALL pw_pool_give_back_pw(auxbas_pw_pool, cdft_control%group(iatom)%weight)
+            CALL auxbas_pw_pool%give_back_pw(cdft_control%group(iatom)%weight)
             DEALLOCATE (cdft_control%group(iatom)%weight)
          END DO
          IF (cdft_control%atomic_charges) THEN
             DO iatom = 1, cdft_control%natoms
-               CALL pw_pool_give_back_pw(auxbas_pw_pool, cdft_control%charge(iatom))
+               CALL auxbas_pw_pool%give_back_pw(cdft_control%charge(iatom))
             END DO
             DEALLOCATE (cdft_control%charge)
          END IF
          IF (cdft_control%type == outer_scf_becke_constraint .AND. &
              cdft_control%becke_control%cavity_confine) THEN
             IF (.NOT. ASSOCIATED(cdft_control%becke_control%cavity_mat)) THEN
-               CALL pw_pool_give_back_pw(auxbas_pw_pool, cdft_control%becke_control%cavity)
+               CALL auxbas_pw_pool%give_back_pw(cdft_control%becke_control%cavity)
             ELSE
                DEALLOCATE (cdft_control%becke_control%cavity_mat)
             END IF
          ELSE IF (cdft_control%type == outer_scf_hirshfeld_constraint) THEN
             IF (ASSOCIATED(cdft_control%hirshfeld_control%hirshfeld_env%fnorm)) THEN
-               CALL pw_pool_give_back_pw(auxbas_pw_pool, cdft_control%hirshfeld_control%hirshfeld_env%fnorm)
+               CALL auxbas_pw_pool%give_back_pw(cdft_control%hirshfeld_control%hirshfeld_env%fnorm)
             END IF
          END IF
          IF (ASSOCIATED(cdft_control%charges_fragment)) DEALLOCATE (cdft_control%charges_fragment)

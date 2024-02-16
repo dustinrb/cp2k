@@ -1,6 +1,6 @@
 !--------------------------------------------------------------------------------------------------!
 !   CP2K: A general program to perform molecular dynamics simulations                              !
-!   Copyright 2000-2023 CP2K developers group <https://cp2k.org>                                   !
+!   Copyright 2000-2024 CP2K developers group <https://cp2k.org>                                   !
 !                                                                                                  !
 !   SPDX-License-Identifier: GPL-2.0-or-later                                                      !
 !--------------------------------------------------------------------------------------------------!
@@ -1621,7 +1621,7 @@ CONTAINS
 
       CALL get_cell(cell=cell, periodic=periodic)
 
-      shortest_dist_cell_planes = 1.0E10_dp
+      shortest_dist_cell_planes = 1.0E4_dp
       IF (periodic(1) == 1) THEN
          IF (shortest_dist_cell_planes > plane_distance(1, 0, 0, cell)) THEN
             shortest_dist_cell_planes = plane_distance(1, 0, 0, cell)

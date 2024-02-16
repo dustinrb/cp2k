@@ -1,6 +1,6 @@
 /*----------------------------------------------------------------------------*/
 /*  CP2K: A general program to perform molecular dynamics simulations         */
-/*  Copyright 2000-2023 CP2K developers group <https://cp2k.org>              */
+/*  Copyright 2000-2024 CP2K developers group <https://cp2k.org>              */
 /*                                                                            */
 /*  SPDX-License-Identifier: BSD-3-Clause                                     */
 /*----------------------------------------------------------------------------*/
@@ -260,9 +260,12 @@ static void multiply_packs(const bool transa, const bool transb,
             }
 
             // Count flops.
-            assert(m * n * k >= 0);
-            flop_sum += 2 * m * n * k;
             dbm_library_counter_increment(m, n, k);
+            const int task_flops = 2 * m * n * k;
+            flop_sum += task_flops;
+            if (task_flops == 0) {
+              continue;
+            }
 
             // Add block multiplication to batch.
             batch[ntasks].m = m;

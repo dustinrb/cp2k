@@ -1,6 +1,6 @@
 !--------------------------------------------------------------------------------------------------!
 !   CP2K: A general program to perform molecular dynamics simulations                              !
-!   Copyright 2000-2023 CP2K developers group <https://cp2k.org>                                   !
+!   Copyright 2000-2024 CP2K developers group <https://cp2k.org>                                   !
 !                                                                                                  !
 !   SPDX-License-Identifier: GPL-2.0-or-later                                                      !
 !--------------------------------------------------------------------------------------------------!
@@ -41,15 +41,10 @@ MODULE dm_ls_scf_qs
    USE pw_env_types,                    ONLY: pw_env_get,&
                                               pw_env_type
    USE pw_methods,                      ONLY: pw_zero
-   USE pw_pool_types,                   ONLY: pw_pool_create_pw,&
-                                              pw_pool_give_back_pw,&
-                                              pw_pool_p_type,&
+   USE pw_pool_types,                   ONLY: pw_pool_p_type,&
                                               pw_pool_type
-   USE pw_types,                        ONLY: COMPLEXDATA1D,&
-                                              REALDATA3D,&
-                                              REALSPACE,&
-                                              RECIPROCALSPACE,&
-                                              pw_type
+   USE pw_types,                        ONLY: pw_c1d_gs_type,&
+                                              pw_r3d_rs_type
    USE qs_atomic_block,                 ONLY: calculate_atomic_block_dm
    USE qs_collocate_density,            ONLY: calculate_rho_elec
    USE qs_density_mixing_types,         ONLY: direct_mixing_nr,&
@@ -640,10 +635,11 @@ CONTAINS
       TYPE(dbcsr_p_type), DIMENSION(:), POINTER          :: matrix_ks
       TYPE(dbcsr_type), TARGET                           :: matrix_p_qs
       TYPE(particle_list_type), POINTER                  :: particles
+      TYPE(pw_c1d_gs_type)                               :: wf_g
       TYPE(pw_env_type), POINTER                         :: pw_env
       TYPE(pw_pool_p_type), DIMENSION(:), POINTER        :: pw_pools
       TYPE(pw_pool_type), POINTER                        :: auxbas_pw_pool
-      TYPE(pw_type)                                      :: wf_g, wf_r
+      TYPE(pw_r3d_rs_type)                               :: wf_r
       TYPE(qs_ks_env_type), POINTER                      :: ks_env
       TYPE(qs_subsys_type), POINTER                      :: subsys
 
@@ -668,15 +664,9 @@ CONTAINS
       CALL pw_env_get(pw_env=pw_env, &
                       auxbas_pw_pool=auxbas_pw_pool, &
                       pw_pools=pw_pools)
-      CALL pw_pool_create_pw(pool=auxbas_pw_pool, &
-                             pw=wf_r, &
-                             use_data=REALDATA3D, &
-                             in_space=REALSPACE)
+      CALL auxbas_pw_pool%create_pw(pw=wf_r)
       CALL pw_zero(wf_r)
-      CALL pw_pool_create_pw(pool=auxbas_pw_pool, &
-                             pw=wf_g, &
-                             use_data=COMPLEXDATA1D, &
-                             in_space=RECIPROCALSPACE)
+      CALL auxbas_pw_pool%create_pw(pw=wf_g)
       CALL pw_zero(wf_g)
       CALL calculate_rho_elec(matrix_p=matrix_p_qs, &
                               rho=wf_r, &
@@ -688,8 +678,8 @@ CONTAINS
                          particles=particles, stride=stride)
 
       !free memory
-      CALL pw_pool_give_back_pw(auxbas_pw_pool, wf_r)
-      CALL pw_pool_give_back_pw(auxbas_pw_pool, wf_g)
+      CALL auxbas_pw_pool%give_back_pw(wf_r)
+      CALL auxbas_pw_pool%give_back_pw(wf_g)
       CALL dbcsr_release(matrix_p_qs)
 
       CALL timestop(handle)

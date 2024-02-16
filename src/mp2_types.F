@@ -1,6 +1,6 @@
 !--------------------------------------------------------------------------------------------------!
 !   CP2K: A general program to perform molecular dynamics simulations                              !
-!   Copyright 2000-2023 CP2K developers group <https://cp2k.org>                                   !
+!   Copyright 2000-2024 CP2K developers group <https://cp2k.org>                                   !
 !                                                                                                  !
 !   SPDX-License-Identifier: GPL-2.0-or-later                                                      !
 !--------------------------------------------------------------------------------------------------!
@@ -105,7 +105,7 @@ MODULE mp2_types
       LOGICAL                                            :: big_send = .FALSE.
    END TYPE
 
-   TYPE mp2_gpw_type
+   TYPE mp2_gpw_r3d_rs_type
       REAL(KIND=dp)                                      :: eps_grid = 0.0_dp, &
                                                             eps_filter = 0.0_dp, &
                                                             eps_pgf_orb_S = 0.0_dp
@@ -113,7 +113,7 @@ MODULE mp2_types
       REAL(KIND=dp)                                      :: cutoff = 0.0_dp, &
                                                             relative_cutoff = 0.0_dp
       INTEGER                                            :: size_lattice_sum = 0
-   END TYPE mp2_gpw_type
+   END TYPE mp2_gpw_r3d_rs_type
 
    TYPE ri_mp2_type
       INTEGER                                            :: block_size = 0, &
@@ -303,7 +303,7 @@ MODULE mp2_types
       TYPE(mp2_laplace_type)                             :: ri_laplace = mp2_laplace_type()
       TYPE(mp2_direct_type)                              :: direct_canonical = mp2_direct_type()
       TYPE(libint_potential_type)                        :: potential_parameter = libint_potential_type()
-      TYPE(mp2_gpw_type)                                 :: mp2_gpw = mp2_gpw_type()
+      TYPE(mp2_gpw_r3d_rs_type)                                 :: mp2_gpw = mp2_gpw_r3d_rs_type()
       TYPE(ri_mp2_type)                                  :: ri_mp2 = ri_mp2_type()
       TYPE(ri_rpa_type)                                  :: ri_rpa = ri_rpa_type()
       ! There is a bug with some older compilers preventing requiring an explicit initialization of allocatable components

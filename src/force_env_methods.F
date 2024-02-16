@@ -1,6 +1,6 @@
 !--------------------------------------------------------------------------------------------------!
 !   CP2K: A general program to perform molecular dynamics simulations                              !
-!   Copyright 2000-2023 CP2K developers group <https://cp2k.org>                                   !
+!   Copyright 2000-2024 CP2K developers group <https://cp2k.org>                                   !
 !                                                                                                  !
 !   SPDX-License-Identifier: GPL-2.0-or-later                                                      !
 !--------------------------------------------------------------------------------------------------!
@@ -131,13 +131,8 @@ MODULE force_env_methods
                                               pw_copy,&
                                               pw_integral_ab,&
                                               pw_zero
-   USE pw_pool_types,                   ONLY: pw_pool_create_pw,&
-                                              pw_pool_give_back_pw,&
-                                              pw_pool_type
-   USE pw_types,                        ONLY: REALDATA3D,&
-                                              REALSPACE,&
-                                              pw_release,&
-                                              pw_type
+   USE pw_pool_types,                   ONLY: pw_pool_type
+   USE pw_types,                        ONLY: pw_r3d_rs_type
    USE pwdft_environment,               ONLY: pwdft_calc_energy_force
    USE pwdft_environment_types,         ONLY: pwdft_environment_type
    USE qmmm_force,                      ONLY: qmmm_calc_energy_force
@@ -208,7 +203,7 @@ CONTAINS
                                                             print_scine
       LOGICAL :: calculate_forces, calculate_stress_tensor, energy_consistency, eval_ef, &
          linres_run, my_skip, print_components
-      REAL(KIND=dp)                                      :: checksum, e_pot, sum_energy, &
+      REAL(KIND=dp)                                      :: checksum, e_gap, e_pot, sum_energy, &
                                                             sum_pv_virial, sum_stress_tensor
       REAL(KIND=dp), DIMENSION(3)                        :: grand_total_force, total_force
       REAL(KIND=dp), DIMENSION(3, 3)                     :: atomic_stress_tensor, diff_stress_tensor
@@ -230,6 +225,8 @@ CONTAINS
       calculate_forces = .TRUE.
       energy_consistency = .FALSE.
       linres_run = .FALSE.
+      e_gap = -1.0_dp
+
       IF (PRESENT(eval_energy_forces)) eval_ef = eval_energy_forces
       IF (PRESENT(skip_external_control)) my_skip = skip_external_control
       IF (PRESENT(calc_force)) calculate_forces = calc_force
@@ -262,6 +259,7 @@ CONTAINS
             ELSE
                CALL pwdft_calc_energy_force(force_env%pwdft_env, calculate_forces, .FALSE.)
             END IF
+            e_gap = force_env%pwdft_env%energy%band_gap
          CASE (use_eip_force)
             IF (force_env%eip_env%eip_model == use_lenosky_eip) THEN
                CALL eip_lenosky(force_env%eip_env)
@@ -335,6 +333,10 @@ CONTAINS
       IF (output_unit > 0) THEN
          WRITE (output_unit, '(/,T2,"ENERGY| Total FORCE_EVAL ( ",A," ) energy [a.u.]: ",T55,F26.15)') &
             ADJUSTR(TRIM(use_prog_name(force_env%in_use))), e_pot
+         IF (e_gap .GT. -.1_dp) THEN
+            WRITE (output_unit, '(/,T2,"ENERGY| Total FORCE_EVAL ( ",A," ) gap [a.u.]: ",T55,F26.15)') &
+               ADJUSTR(TRIM(use_prog_name(force_env%in_use))), e_gap
+         END IF
       END IF
       CALL cp_print_key_finished_output(output_unit, logger, force_env%force_env_section, &
                                         "PRINT%PROGRAM_RUN_INFO")
@@ -1396,7 +1398,7 @@ CONTAINS
       TYPE(particle_list_type), POINTER                  :: particles_embed
       TYPE(pw_env_type), POINTER                         :: pw_env
       TYPE(pw_pool_type), POINTER                        :: auxbas_pw_pool
-      TYPE(pw_type), POINTER                             :: embed_pot, spin_embed_pot
+      TYPE(pw_r3d_rs_type), POINTER                      :: embed_pot, spin_embed_pot
       TYPE(section_vals_type), POINTER                   :: embed_section, force_env_section, &
                                                             mapping_section, root_section
 
@@ -1490,14 +1492,14 @@ CONTAINS
                CALL get_qs_env(qs_env=force_env%sub_force_env(iforce_eval)%force_env%qs_env, &
                                embed_pot=embed_pot, spin_embed_pot=spin_embed_pot, pw_env=pw_env)
                CALL pw_env_get(pw_env, auxbas_pw_pool=auxbas_pw_pool)
-               CALL pw_pool_give_back_pw(auxbas_pw_pool, embed_pot)
+               CALL auxbas_pw_pool%give_back_pw(embed_pot)
                IF (ASSOCIATED(embed_pot)) THEN
-                  CALL pw_release(embed_pot)
+                  CALL embed_pot%release()
                   DEALLOCATE (embed_pot)
                END IF
                IF (ASSOCIATED(spin_embed_pot)) THEN
-                  CALL pw_pool_give_back_pw(auxbas_pw_pool, spin_embed_pot)
-                  CALL pw_release(spin_embed_pot)
+                  CALL auxbas_pw_pool%give_back_pw(spin_embed_pot)
+                  CALL spin_embed_pot%release()
                   DEALLOCATE (spin_embed_pot)
                END IF
             END IF
@@ -1607,9 +1609,9 @@ CONTAINS
       TYPE(opt_embed_pot_type)                           :: opt_embed
       TYPE(pw_env_type), POINTER                         :: pw_env
       TYPE(pw_pool_type), POINTER                        :: auxbas_pw_pool
-      TYPE(pw_type)                                      :: diff_rho_r, diff_rho_spin
-      TYPE(pw_type), DIMENSION(:), POINTER               :: rho_r_ref, rho_r_subsys
-      TYPE(pw_type), POINTER                             :: embed_pot, embed_pot_subsys, &
+      TYPE(pw_r3d_rs_type)                               :: diff_rho_r, diff_rho_spin
+      TYPE(pw_r3d_rs_type), DIMENSION(:), POINTER        :: rho_r_ref, rho_r_subsys
+      TYPE(pw_r3d_rs_type), POINTER                      :: embed_pot, embed_pot_subsys, &
                                                             spin_embed_pot, spin_embed_pot_subsys
       TYPE(qs_energy_type), POINTER                      :: energy
       TYPE(qs_rho_type), POINTER                         :: rho, subsys_rho
@@ -1665,14 +1667,10 @@ CONTAINS
 
       ! Prepare the pw object to store density differences
       CALL pw_env_get(pw_env, auxbas_pw_pool=auxbas_pw_pool)
-      CALL pw_pool_create_pw(auxbas_pw_pool, diff_rho_r, &
-                             use_data=REALDATA3D, &
-                             in_space=REALSPACE)
+      CALL auxbas_pw_pool%create_pw(diff_rho_r)
       CALL pw_zero(diff_rho_r)
       IF (opt_embed%open_shell_embed) THEN
-         CALL pw_pool_create_pw(auxbas_pw_pool, diff_rho_spin, &
-                                use_data=REALDATA3D, &
-                                in_space=REALSPACE)
+         CALL auxbas_pw_pool%create_pw(diff_rho_spin)
          CALL pw_zero(diff_rho_spin)
       END IF
 
@@ -1841,10 +1839,10 @@ CONTAINS
             END IF
 
             ! Release embedding potential for subsystem
-            CALL pw_release(embed_pot_subsys)
+            CALL embed_pot_subsys%release()
             DEALLOCATE (embed_pot_subsys)
             IF (opt_embed%open_shell_embed) THEN
-               CALL pw_release(spin_embed_pot_subsys)
+               CALL spin_embed_pot_subsys%release()
                DEALLOCATE (spin_embed_pot_subsys)
             END IF
 
@@ -1914,9 +1912,9 @@ CONTAINS
       END IF
 
       ! Give away plane waves pools
-      CALL pw_release(diff_rho_r)
+      CALL diff_rho_r%release()
       IF (opt_embed%open_shell_embed) THEN
-         CALL pw_release(diff_rho_spin)
+         CALL diff_rho_spin%release()
       END IF
 
       CALL cp_print_key_finished_output(output_unit, logger, force_env%force_env_section, &
@@ -1954,10 +1952,10 @@ CONTAINS
       CALL release_opt_embed(opt_embed)
 
       ! Deallocate embedding potential
-      CALL pw_release(embed_pot)
+      CALL embed_pot%release()
       DEALLOCATE (embed_pot)
       IF (opt_embed%open_shell_embed) THEN
-         CALL pw_release(spin_embed_pot)
+         CALL spin_embed_pot%release()
          DEALLOCATE (spin_embed_pot)
       END IF
 

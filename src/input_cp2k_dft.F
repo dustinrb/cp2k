@@ -1,6 +1,6 @@
 !--------------------------------------------------------------------------------------------------!
 !   CP2K: A general program to perform molecular dynamics simulations                              !
-!   Copyright 2000-2023 CP2K developers group <https://cp2k.org>                                   !
+!   Copyright 2000-2024 CP2K developers group <https://cp2k.org>                                   !
 !                                                                                                  !
 !   SPDX-License-Identifier: GPL-2.0-or-later                                                      !
 !--------------------------------------------------------------------------------------------------!
@@ -20,7 +20,7 @@ MODULE input_cp2k_dft
       Ehrhardt1985, Eriksen2020, Fattebert2002, Golze2017a, Golze2017b, Guidon2010, &
       Heinzmann1976, Holmberg2017, Holmberg2018, Iannuzzi2005, Iannuzzi2006, Iannuzzi2007, &
       Knizia2013, Kolafa2004, Krack2000, Krack2002, Kuhne2007, Kunert2003, Lippert1997, &
-      Lippert1999, Lu2004, Perdew1981, Repasky2002, Rocha2006, Schenter2008, Schiffmann2015, &
+      Lippert1999, Lu2004, Merlot2014, Perdew1981, Repasky2002, Rocha2006, Schenter2008, Schiffmann2015, &
       Shigeta2001, Stewart1982, Stewart1989, Stewart2007, Thiel1992, VanVoorhis2015, &
       VandeVondele2003, VandeVondele2005a, VandeVondele2005b, VandeVondele2006, Weber2008, &
       Yin2017
@@ -105,7 +105,8 @@ MODULE input_cp2k_dft
       xas_1s_type, xas_2p_type, xas_2s_type, xas_3d_type, xas_3p_type, xas_3s_type, xas_4d_type, &
       xas_4f_type, xas_4p_type, xas_4s_type, xas_dip_len, xas_dip_vel, xas_dscf, xas_none, &
       xas_not_excited, xas_tdp_by_index, xas_tdp_by_kind, xas_tp_fh, xas_tp_flex, xas_tp_hh, &
-      xas_tp_xfh, xas_tp_xhh, xes_tp_val
+      xas_tp_xfh, xas_tp_xhh, xes_tp_val, &
+      no_admm_type, admm1_type, admm2_type, admms_type, admmp_type, admmq_type
    USE input_cp2k_almo, ONLY: create_almo_scf_section
    USE input_cp2k_distribution, ONLY: create_distribution_section
    USE input_cp2k_ec, ONLY: create_ec_section
@@ -308,7 +309,7 @@ CONTAINS
       CALL keyword_release(keyword)
 
       CALL keyword_create(keyword, __LOCATION__, name="AUTO_BASIS", &
-                          description="Specify size of automatically generated auxiliary basis sets: "// &
+                          description="Specify size of automatically generated auxiliary (RI) basis sets: "// &
                           "Options={small,medium,large,huge}", &
                           usage="AUTO_BASIS {basis_type} {basis_size}", &
                           type_of_var=char_t, repeats=.TRUE., n_var=-1, default_c_vals=(/"X", "X"/))
@@ -1825,6 +1826,13 @@ CONTAINS
                           description="Calculate detailed atomic decomposition energies.", &
                           usage="DETAILED_ENERGY {logical}", repeats=.FALSE., n_var=1, &
                           default_l_val=.FALSE., lone_keyword_l_val=.TRUE., type_of_var=logical_t)
+      CALL section_add_keyword(print_key, keyword)
+      CALL keyword_release(keyword)
+      CALL keyword_create(keyword, __LOCATION__, name="EWALD_ALPHA_PARAMETER", &
+                          description="Calculate Energy Decomposition for a specific alpha value. "// &
+                          "alpha = 1/(2*rc**2), see GTH pseudopotentials.", &
+                          usage="EWALD_ALPHA_PARAMETER alpha", repeats=.FALSE., n_var=1, &
+                          default_r_val=0.0_dp, type_of_var=real_t)
       CALL section_add_keyword(print_key, keyword)
       CALL keyword_release(keyword)
 
@@ -3479,6 +3487,24 @@ CONTAINS
                           description="Parameters needed for the ADMM method.", &
                           n_keywords=1, n_subsections=1, repeats=.FALSE., &
                           citations=(/Guidon2010/))
+
+      CALL keyword_create( &
+         keyword, __LOCATION__, &
+         name="ADMM_TYPE", &
+         description="Type of ADMM (sort name) as refered in literature. "// &
+         "This sets values for METHOD, ADMM_PURIFICATION_METHOD, and EXCH_SCALING_MODEL", &
+         enum_c_vals=s2a("NONE", "ADMM1", "ADMM2", "ADMMS", "ADMMP", "ADMMQ"), &
+         enum_desc=s2a("No short name is used, use specific definitions (default)", &
+                       "ADMM1 method from Guidon2010", &
+                       "ADMM2 method from Guidon2010", &
+                       "ADMMS method from Merlot2014", &
+                       "ADMMP method from Merlot2014", &
+                       "ADMMQ method from Merlot2014"), &
+         enum_i_vals=(/no_admm_type, admm1_type, admm2_type, admms_type, admmp_type, admmq_type/), &
+         default_i_val=no_admm_type, &
+         citations=(/Guidon2010, Merlot2014/))
+      CALL section_add_keyword(section, keyword)
+      CALL keyword_release(keyword)
 
       CALL keyword_create( &
          keyword, __LOCATION__, &
@@ -5184,9 +5210,13 @@ CONTAINS
       CALL section_add_keyword(section, keyword)
       CALL keyword_release(keyword)
 
-      CALL keyword_create(keyword, __LOCATION__, name="NOTCONV_STOPALL", &
-                          description="If true, it stops higher level of iteration when SCF does not converge", &
-                          usage="NOTCONV_STOPALL logical_value", default_l_val=.FALSE., lone_keyword_l_val=.TRUE.)
+      CALL keyword_create(keyword, __LOCATION__, name="IGNORE_CONVERGENCE_FAILURE", &
+                          description="If true, only a warning is issued if an SCF "// &
+                          "iteration has not converged. By default, a run is aborted "// &
+                          "if the required convergence criteria have not been achieved.", &
+                          usage="IGNORE_CONVERGENCE_FAILURE logical_value", &
+                          default_l_val=.FALSE., &
+                          lone_keyword_l_val=.TRUE.)
       CALL section_add_keyword(section, keyword)
       CALL keyword_release(keyword)
 
@@ -8813,6 +8843,16 @@ CONTAINS
       CALL section_add_keyword(print_key, keyword)
       CALL keyword_release(keyword)
 
+      CALL section_add_subsection(print_section, print_key)
+      CALL section_release(print_key)
+
+      CALL cp_print_key_section_create(print_key, __LOCATION__, "E_CONSTITUENTS", &
+                                       description="Print the energy constituents (relevant to RTP) which make up "// &
+                                       "the Total Energy", &
+                                       print_level=high_print_level, common_iter_levels=1, &
+                                       each_iter_names=s2a("MD"), &
+                                       each_iter_values=(/1/), &
+                                       filename="rtp")
       CALL section_add_subsection(print_section, print_key)
       CALL section_release(print_key)
 

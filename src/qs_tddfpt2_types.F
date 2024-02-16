@@ -1,6 +1,6 @@
 !--------------------------------------------------------------------------------------------------!
 !   CP2K: A general program to perform molecular dynamics simulations                              !
-!   Copyright 2000-2023 CP2K developers group <https://cp2k.org>                                   !
+!   Copyright 2000-2024 CP2K developers group <https://cp2k.org>                                   !
 !                                                                                                  !
 !   SPDX-License-Identifier: GPL-2.0-or-later                                                      !
 !--------------------------------------------------------------------------------------------------!
@@ -41,14 +41,9 @@ MODULE qs_tddfpt2_types
    USE message_passing,                 ONLY: mp_para_env_type
    USE parallel_gemm_api,               ONLY: parallel_gemm
    USE pw_env_types,                    ONLY: pw_env_get
-   USE pw_pool_types,                   ONLY: pw_pool_create_pw,&
-                                              pw_pool_give_back_pw,&
-                                              pw_pool_type
-   USE pw_types,                        ONLY: COMPLEXDATA1D,&
-                                              REALDATA3D,&
-                                              REALSPACE,&
-                                              RECIPROCALSPACE,&
-                                              pw_type
+   USE pw_pool_types,                   ONLY: pw_pool_type
+   USE pw_types,                        ONLY: pw_c1d_gs_type,&
+                                              pw_r3d_rs_type
    USE qs_environment_types,            ONLY: get_qs_env,&
                                               qs_environment_type
    USE qs_kind_types,                   ONLY: qs_kind_type
@@ -159,17 +154,17 @@ MODULE qs_tddfpt2_types
       !> electron density in terms of auxiliary basis set
       TYPE(qs_rho_type), POINTER                         :: rho_aux_fit_struct_sub
       !> group-specific copy of a Coulomb/xc-potential on a real-space grid
-      TYPE(pw_type), DIMENSION(:), POINTER             :: A_ia_rspace_sub
+      TYPE(pw_r3d_rs_type), DIMENSION(:), POINTER             :: A_ia_rspace_sub
       !> group-specific copy of a reciprocal-space grid
-      TYPE(pw_type), DIMENSION(:), POINTER             :: wpw_gspace_sub
+      TYPE(pw_c1d_gs_type), DIMENSION(:), POINTER             :: wpw_gspace_sub
       !> group-specific copy of a real-space grid
-      TYPE(pw_type), DIMENSION(:), POINTER             :: wpw_rspace_sub
+      TYPE(pw_r3d_rs_type), DIMENSION(:), POINTER             :: wpw_rspace_sub
       !> group-specific copy of a real-space grid for the kinetic energy density
-      TYPE(pw_type), DIMENSION(:), POINTER             :: wpw_tau_rspace_sub
+      TYPE(pw_r3d_rs_type), DIMENSION(:), POINTER             :: wpw_tau_rspace_sub
       !
       ! *** real space pw grid to hold fxc kernel <> A_ia_rspace_sub ***
       !
-      TYPE(pw_type), DIMENSION(:), POINTER             :: fxc_rspace_sub
+      TYPE(pw_r3d_rs_type), DIMENSION(:), POINTER             :: fxc_rspace_sub
       !
       ! *** globally distributed matrices required to compute exact exchange terms ***
       !
@@ -414,15 +409,10 @@ CONTAINS
       ALLOCATE (work_matrices%wpw_gspace_sub(nspins), work_matrices%wpw_rspace_sub(nspins), &
                 work_matrices%wpw_tau_rspace_sub(nspins))
       DO ispin = 1, nspins
-         CALL pw_pool_create_pw(auxbas_pw_pool, work_matrices%A_ia_rspace_sub(ispin), &
-                                use_data=REALDATA3D, in_space=REALSPACE)
-
-         CALL pw_pool_create_pw(auxbas_pw_pool, work_matrices%wpw_gspace_sub(ispin), &
-                                use_data=COMPLEXDATA1D, in_space=RECIPROCALSPACE)
-         CALL pw_pool_create_pw(auxbas_pw_pool, work_matrices%wpw_rspace_sub(ispin), &
-                                use_data=REALDATA3D, in_space=REALSPACE)
-         CALL pw_pool_create_pw(auxbas_pw_pool, work_matrices%wpw_tau_rspace_sub(ispin), &
-                                use_data=REALDATA3D, in_space=REALSPACE)
+         CALL auxbas_pw_pool%create_pw(work_matrices%A_ia_rspace_sub(ispin))
+         CALL auxbas_pw_pool%create_pw(work_matrices%wpw_gspace_sub(ispin))
+         CALL auxbas_pw_pool%create_pw(work_matrices%wpw_rspace_sub(ispin))
+         CALL auxbas_pw_pool%create_pw(work_matrices%wpw_tau_rspace_sub(ispin))
       END DO
 
       ! fxc kernel potential real space grid
@@ -430,8 +420,7 @@ CONTAINS
          ! we need spins: aa, ab, bb
          ALLOCATE (work_matrices%fxc_rspace_sub(3))
          DO ispin = 1, 3
-            CALL pw_pool_create_pw(auxbas_pw_pool, work_matrices%fxc_rspace_sub(ispin), &
-                                   use_data=REALDATA3D, in_space=REALSPACE)
+            CALL auxbas_pw_pool%create_pw(work_matrices%fxc_rspace_sub(ispin))
          END DO
       ELSE
          NULLIFY (work_matrices%fxc_rspace_sub)
@@ -706,16 +695,16 @@ CONTAINS
       IF (ASSOCIATED(sub_env%pw_env)) THEN
          CALL pw_env_get(sub_env%pw_env, auxbas_pw_pool=auxbas_pw_pool)
          DO ispin = SIZE(work_matrices%wpw_rspace_sub), 1, -1
-            CALL pw_pool_give_back_pw(auxbas_pw_pool, work_matrices%wpw_rspace_sub(ispin))
-            CALL pw_pool_give_back_pw(auxbas_pw_pool, work_matrices%wpw_tau_rspace_sub(ispin))
-            CALL pw_pool_give_back_pw(auxbas_pw_pool, work_matrices%wpw_gspace_sub(ispin))
-            CALL pw_pool_give_back_pw(auxbas_pw_pool, work_matrices%A_ia_rspace_sub(ispin))
+            CALL auxbas_pw_pool%give_back_pw(work_matrices%wpw_rspace_sub(ispin))
+            CALL auxbas_pw_pool%give_back_pw(work_matrices%wpw_tau_rspace_sub(ispin))
+            CALL auxbas_pw_pool%give_back_pw(work_matrices%wpw_gspace_sub(ispin))
+            CALL auxbas_pw_pool%give_back_pw(work_matrices%A_ia_rspace_sub(ispin))
          END DO
          DEALLOCATE (work_matrices%A_ia_rspace_sub, work_matrices%wpw_gspace_sub, &
                      work_matrices%wpw_rspace_sub, work_matrices%wpw_tau_rspace_sub)
          IF (ASSOCIATED(work_matrices%fxc_rspace_sub)) THEN
             DO ispin = SIZE(work_matrices%fxc_rspace_sub), 1, -1
-               CALL pw_pool_give_back_pw(auxbas_pw_pool, work_matrices%fxc_rspace_sub(ispin))
+               CALL auxbas_pw_pool%give_back_pw(work_matrices%fxc_rspace_sub(ispin))
             END DO
             DEALLOCATE (work_matrices%fxc_rspace_sub)
          END IF

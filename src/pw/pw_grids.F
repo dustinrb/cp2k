@@ -1,6 +1,6 @@
 !--------------------------------------------------------------------------------------------------!
 !   CP2K: A general program to perform molecular dynamics simulations                              !
-!   Copyright 2000-2023 CP2K developers group <https://cp2k.org>                                   !
+!   Copyright 2000-2024 CP2K developers group <https://cp2k.org>                                   !
 !                                                                                                  !
 !   SPDX-License-Identifier: GPL-2.0-or-later                                                      !
 !--------------------------------------------------------------------------------------------------!
@@ -1122,7 +1122,7 @@ CONTAINS
 
       END IF
 
-      ! pos_of_x(i) tells on which cpu pw%cr3d(i,:,:) is located
+      ! pos_of_x(i) tells on which cpu pw%array(i,:,:) is located
       ! should be computable in principle, without the need for communication
       IF (pw_grid%para%mode .EQ. PW_MODE_DISTRIBUTED) THEN
          ALLOCATE (pw_grid%para%pos_of_x(pw_grid%bounds(1, 1):pw_grid%bounds(2, 1)))

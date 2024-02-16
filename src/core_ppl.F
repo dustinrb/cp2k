@@ -1,6 +1,6 @@
 !--------------------------------------------------------------------------------------------------!
 !   CP2K: A general program to perform molecular dynamics simulations                              !
-!   Copyright 2000-2023 CP2K developers group <https://cp2k.org>                                   !
+!   Copyright 2000-2024 CP2K developers group <https://cp2k.org>                                   !
 !                                                                                                  !
 !   SPDX-License-Identifier: GPL-2.0-or-later                                                      !
 !--------------------------------------------------------------------------------------------------!
@@ -31,6 +31,10 @@ MODULE core_ppl
                                               sgp_potential_type
    USE kinds,                           ONLY: dp,&
                                               int_8
+   USE libgrpp_integrals,               ONLY: libgrpp_local_forces_ref,&
+                                              libgrpp_local_integrals,&
+                                              libgrpp_semilocal_forces_ref,&
+                                              libgrpp_semilocal_integrals
    USE lri_environment_types,           ONLY: lri_kind_type
    USE orbital_pointers,                ONLY: init_orbital_pointers,&
                                               ncoset
@@ -112,16 +116,18 @@ CONTAINS
       INTEGER :: atom_a, handle, i, iatom, icol, ikind, img, irow, iset, jatom, jkind, jset, &
          katom, kkind, ldai, ldsab, maxco, maxder, maxl, maxlgto, maxlppl, maxnset, maxsgf, mepos, &
          n_local, natom, ncoa, ncob, nexp_lpot, nexp_ppl, nkind, nloc, nseta, nsetb, nthread, &
-         sgfa, sgfb, slot
+         sgfa, sgfb, slmax, slot
       INTEGER, ALLOCATABLE, DIMENSION(:)                 :: atom_of_kind, kind_of
+      INTEGER, DIMENSION(0:10)                           :: npot
       INTEGER, DIMENSION(1:10)                           :: nrloc
+      INTEGER, DIMENSION(1:15, 0:10)                     :: nrpot
       INTEGER, DIMENSION(3)                              :: cellind
       INTEGER, DIMENSION(:), POINTER                     :: la_max, la_min, lb_max, lb_min, &
                                                             nct_lpot, npgfa, npgfb, nsgfa, nsgfb
       INTEGER, DIMENSION(:, :), POINTER                  :: first_sgfa, first_sgfb
       INTEGER, DIMENSION(nexp_max)                       :: nct_ppl
-      LOGICAL                                            :: do_dR, dokp, ecp_local, found, &
-                                                            lpotextended
+      LOGICAL                                            :: do_dR, dokp, ecp_local, ecp_semi_local, &
+                                                            found, lpotextended, only_gaussians
       REAL(KIND=dp)                                      :: alpha, dab, dac, dbc, f0, ppl_radius
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :)        :: qab, work
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :, :)     :: hab2_w, ppl_fwork, ppl_work
@@ -129,6 +135,7 @@ CONTAINS
       REAL(KIND=dp), ALLOCATABLE, &
          DIMENSION(:, :, :, :, :)                        :: hab2
       REAL(KIND=dp), DIMENSION(1:10)                     :: aloc, bloc
+      REAL(KIND=dp), DIMENSION(1:15, 0:10)               :: apot, bpot
       REAL(KIND=dp), DIMENSION(3)                        :: force_a, force_b, rab, rac, rbc
       REAL(KIND=dp), DIMENSION(3, 3)                     :: pv_thread
       TYPE(neighbor_list_iterator_p_type), &
@@ -229,8 +236,10 @@ CONTAINS
 !$OMP          ppl_radius, nexp_lpot, nexp_ppl, alpha_ppl, alpha_lpot, nct_ppl, &
 !$OMP          nct_lpot, cval_ppl, cval_lpot, rac, dac, rbc, dbc, &
 !$OMP          set_radius_a,  rpgfa, force_a, force_b, ppl_fwork, mepos, &
-!$OMP          slot, f0, katom, ppl_work, cellind, img, ecp_local, &
-!$OMP          nloc, nrloc, aloc, bloc, n_local, a_local, c_local, ldai, hash, hash1, hash2, iatom8) &
+!$OMP          slot, f0, katom, ppl_work, cellind, img, ecp_local, ecp_semi_local, &
+!$OMP          nloc, nrloc, aloc, bloc, n_local, a_local, c_local, &
+!$OMP          slmax, npot, nrpot, apot, bpot, only_gaussians, &
+!$OMP          ldai, hash, hash1, hash2, iatom8) &
 !$OMP REDUCTION (+ : pv_thread, force_thread )
 
 !$OMP SINGLE
@@ -376,6 +385,8 @@ CONTAINS
 
             CALL get_qs_kind(qs_kind_set(kkind), gth_potential=gth_potential, &
                              sgp_potential=sgp_potential)
+            ecp_semi_local = .FALSE.
+            only_gaussians = .TRUE.
             IF (ASSOCIATED(gth_potential)) THEN
                CALL get_potential(potential=gth_potential, &
                                   alpha_ppl=alpha, cexp_ppl=cexp_ppl, &
@@ -397,15 +408,17 @@ CONTAINS
                   END DO
                END IF
             ELSE IF (ASSOCIATED(sgp_potential)) THEN
-               CALL get_potential(potential=sgp_potential, ecp_local=ecp_local, ppl_radius=ppl_radius)
+               CALL get_potential(potential=sgp_potential, ecp_local=ecp_local, ecp_semi_local=ecp_semi_local, &
+                                  ppl_radius=ppl_radius)
                IF (ecp_local) THEN
                   CALL get_potential(potential=sgp_potential, nloc=nloc, nrloc=nrloc, aloc=aloc, bloc=bloc)
-                  IF (SUM(ABS(aloc(1:nloc))) < 1.0e-12_dp) CYCLE
                   nexp_ppl = nloc
                   CPASSERT(nexp_ppl <= nexp_max)
-                  nct_ppl(1:nloc) = nrloc(1:nloc) - 1
+                  nct_ppl(1:nloc) = nrloc(1:nloc)
                   alpha_ppl(1:nloc) = bloc(1:nloc)
                   cval_ppl(1, 1:nloc) = aloc(1:nloc)
+                  only_gaussians = ALL(nct_ppl(1:nloc) == 2)
+                  IF (only_gaussians) nct_ppl(1:nloc) = nct_ppl(1:nloc) - 1
                ELSE
                   CALL get_potential(potential=sgp_potential, n_local=n_local, a_local=a_local, c_local=c_local)
                   nexp_ppl = n_local
@@ -413,6 +426,12 @@ CONTAINS
                   nct_ppl(1:n_local) = 1
                   alpha_ppl(1:n_local) = a_local(1:n_local)
                   cval_ppl(1, 1:n_local) = c_local(1:n_local)
+               END IF
+               IF (ecp_semi_local) THEN
+                  CALL get_potential(potential=sgp_potential, sl_lmax=slmax, &
+                                     npot=npot, nrpot=nrpot, apot=apot, bpot=bpot)
+               ELSEIF (ecp_local) THEN
+                  IF (SUM(ABS(aloc(1:nloc))) < 1.0e-12_dp) CYCLE
                END IF
             ELSE
                CYCLE
@@ -444,15 +463,46 @@ CONTAINS
                      ! *** Calculate the GTH pseudo potential forces ***
                      IF (calculate_forces) THEN
 
-                        CALL ppl_integral( &
-                           la_max(iset), la_min(iset), npgfa(iset), &
-                           rpgfa(:, iset), zeta(:, iset), &
-                           lb_max(jset), lb_min(jset), npgfb(jset), &
-                           rpgfb(:, jset), zetb(:, jset), &
-                           nexp_ppl, alpha_ppl, nct_ppl, cval_ppl, ppl_radius, &
-                           rab, dab, rac, dac, rbc, dbc, &
-                           hab(:, :, iset, jset), ppl_work, pab(:, :, iset, jset), &
-                           force_a, force_b, ppl_fwork)
+                        force_a(:) = 0.0_dp
+                        force_b(:) = 0.0_dp
+
+                        IF (only_gaussians) THEN
+                           CALL ppl_integral( &
+                              la_max(iset), la_min(iset), npgfa(iset), &
+                              rpgfa(:, iset), zeta(:, iset), &
+                              lb_max(jset), lb_min(jset), npgfb(jset), &
+                              rpgfb(:, jset), zetb(:, jset), &
+                              nexp_ppl, alpha_ppl, nct_ppl, cval_ppl, ppl_radius, &
+                              rab, dab, rac, dac, rbc, dbc, &
+                              hab(:, :, iset, jset), ppl_work, pab(:, :, iset, jset), &
+                              force_a, force_b, ppl_fwork)
+                        ELSE
+
+!$OMP CRITICAL(type1)
+                           CALL libgrpp_local_forces_ref(la_max(iset), la_min(iset), npgfa(iset), &
+                                                         rpgfa(:, iset), zeta(:, iset), &
+                                                         lb_max(jset), lb_min(jset), npgfb(jset), &
+                                                         rpgfb(:, jset), zetb(:, jset), &
+                                                         nexp_ppl, alpha_ppl, cval_ppl(1, :), nct_ppl, &
+                                                         ppl_radius, rab, dab, rac, dac, dbc, &
+                                                         hab(:, :, iset, jset), pab(:, :, iset, jset), &
+                                                         force_a, force_b)
+!$OMP END CRITICAL(type1)
+                        END IF
+
+                        IF (ecp_semi_local) THEN
+
+!$OMP CRITICAL(type2)
+                           CALL libgrpp_semilocal_forces_ref(la_max(iset), la_min(iset), npgfa(iset), &
+                                                             rpgfa(:, iset), zeta(:, iset), &
+                                                             lb_max(jset), lb_min(jset), npgfb(jset), &
+                                                             rpgfb(:, jset), zetb(:, jset), &
+                                                             slmax, npot, bpot, apot, nrpot, &
+                                                             ppl_radius, rab, dab, rac, dac, dbc, &
+                                                             hab(:, :, iset, jset), pab(:, :, iset, jset), &
+                                                             force_a, force_b)
+!$OMP END CRITICAL(type2)
+                        END IF
                         ! *** The derivatives w.r.t. atomic center c are    ***
                         ! *** calculated using the translational invariance ***
                         ! *** of the first derivatives                      ***
@@ -487,14 +537,47 @@ CONTAINS
                            vab=hab(:, :, iset, jset), s=ppl_work, &
                            hab2=hab2(:, :, :, iset, jset), hab2_work=hab2_w, fs=ppl_fwork, &
                            deltaR=deltaR, iatom=iatom, jatom=jatom, katom=katom)
+                        IF (ecp_semi_local) THEN
+                           ! semi local ECP part
+                           CPABORT("Option not implemented")
+                        END IF
                      ELSE
-                        CALL ppl_integral( &
-                           la_max(iset), la_min(iset), npgfa(iset), &
-                           rpgfa(:, iset), zeta(:, iset), &
-                           lb_max(jset), lb_min(jset), npgfb(jset), &
-                           rpgfb(:, jset), zetb(:, jset), &
-                           nexp_ppl, alpha_ppl, nct_ppl, cval_ppl, ppl_radius, &
-                           rab, dab, rac, dac, rbc, dbc, hab(:, :, iset, jset), ppl_work)
+                        IF (only_gaussians) THEN
+                           !If the local part of the pseudo-potential only has Gaussian functions
+                           !we can use CP2K native code, that can run without libgrpp installation
+                           CALL ppl_integral( &
+                              la_max(iset), la_min(iset), npgfa(iset), &
+                              rpgfa(:, iset), zeta(:, iset), &
+                              lb_max(jset), lb_min(jset), npgfb(jset), &
+                              rpgfb(:, jset), zetb(:, jset), &
+                              nexp_ppl, alpha_ppl, nct_ppl, cval_ppl, ppl_radius, &
+                              rab, dab, rac, dac, rbc, dbc, hab(:, :, iset, jset), ppl_work)
+
+                        ELSE
+                           !If the local part of the potential is more complex, we need libgrpp
+!$OMP CRITICAL(type1)
+                           CALL libgrpp_local_integrals(la_max(iset), la_min(iset), npgfa(iset), &
+                                                        rpgfa(:, iset), zeta(:, iset), &
+                                                        lb_max(jset), lb_min(jset), npgfb(jset), &
+                                                        rpgfb(:, jset), zetb(:, jset), &
+                                                        nexp_ppl, alpha_ppl, cval_ppl(1, :), nct_ppl, &
+                                                        ppl_radius, rab, dab, rac, dac, dbc, &
+                                                        hab(:, :, iset, jset))
+!$OMP END CRITICAL(type1)
+                        END IF
+
+                        IF (ecp_semi_local) THEN
+                           ! semi local ECP part
+!$OMP CRITICAL(type2)
+                           CALL libgrpp_semilocal_integrals(la_max(iset), la_min(iset), npgfa(iset), &
+                                                            rpgfa(:, iset), zeta(:, iset), &
+                                                            lb_max(jset), lb_min(jset), npgfb(jset), &
+                                                            rpgfb(:, jset), zetb(:, jset), &
+                                                            slmax, npot, bpot, apot, nrpot, &
+                                                            ppl_radius, rab, dab, rac, dac, dbc, &
+                                                            hab(:, :, iset, jset))
+!$OMP END CRITICAL(type2)
+                        END IF
                      END IF
                   END DO
                END DO
@@ -680,7 +763,7 @@ CONTAINS
       INTEGER, DIMENSION(:), POINTER                     :: la_max, la_min, nct_lpot, npgfa, nsgfa
       INTEGER, DIMENSION(:, :), POINTER                  :: first_sgfa
       INTEGER, DIMENSION(nexp_max)                       :: nct_ppl
-      LOGICAL                                            :: ecp_local, lpotextended
+      LOGICAL                                            :: ecp_local, ecp_semi_local, lpotextended
       REAL(KIND=dp)                                      :: alpha, dac, ppl_radius
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:)           :: va, work
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :)        :: dva, dvas
@@ -736,7 +819,8 @@ CONTAINS
 !$OMP          first_sgfa,la_max,la_min,npgfa,nseta,nsgfa,rpgfa,set_radius_a,&
 !$OMP          sphi_a,zeta,gth_potential,sgp_potential,alpha,cexp_ppl,lpotextended,ppl_radius,&
 !$OMP          nexp_ppl,alpha_ppl,nct_ppl,cval_ppl,nloc,n_local,nrloc,a_local,aloc,bloc,c_local,nfun,work,&
-!$OMP          hash,dac,force_a,iset,sgfa,sgfb,ncoa,bcon,cval_lpot,nct_lpot,alpha_lpot,nexp_lpot,ecp_local) &
+!$OMP          hash,dac,force_a,iset,sgfa,sgfb,ncoa,bcon,cval_lpot,nct_lpot,alpha_lpot,nexp_lpot,&
+!$OMP          ecp_local,ecp_semi_local) &
 !$OMP REDUCTION (+ : pv_thread, force_thread )
 
 !$OMP SINGLE
@@ -782,6 +866,7 @@ CONTAINS
 
          CALL get_qs_kind(qs_kind_set(kkind), gth_potential=gth_potential, &
                           sgp_potential=sgp_potential)
+         ecp_semi_local = .FALSE.
          IF (ASSOCIATED(gth_potential)) THEN
             CALL get_potential(potential=gth_potential, &
                                alpha_ppl=alpha, cexp_ppl=cexp_ppl, &
@@ -802,13 +887,15 @@ CONTAINS
                END DO
             END IF
          ELSE IF (ASSOCIATED(sgp_potential)) THEN
-            CALL get_potential(potential=sgp_potential, ecp_local=ecp_local, ppl_radius=ppl_radius)
+            CALL get_potential(potential=sgp_potential, ecp_local=ecp_local, ecp_semi_local=ecp_semi_local, &
+                               ppl_radius=ppl_radius)
+            CPASSERT(.NOT. ecp_semi_local)
             IF (ecp_local) THEN
                CALL get_potential(potential=sgp_potential, nloc=nloc, nrloc=nrloc, aloc=aloc, bloc=bloc)
                IF (SUM(ABS(aloc(1:nloc))) < 1.0e-12_dp) CYCLE
                nexp_ppl = nloc
                CPASSERT(nexp_ppl <= nexp_max)
-               nct_ppl(1:nloc) = nrloc(1:nloc) - 1
+               nct_ppl(1:nloc) = nrloc(1:nloc)
                alpha_ppl(1:nloc) = bloc(1:nloc)
                cval_ppl(1, 1:nloc) = aloc(1:nloc)
             ELSE

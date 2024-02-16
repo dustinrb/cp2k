@@ -1,6 +1,6 @@
 !--------------------------------------------------------------------------------------------------!
 !   CP2K: A general program to perform molecular dynamics simulations                              !
-!   Copyright 2000-2023 CP2K developers group <https://cp2k.org>                                   !
+!   Copyright 2000-2024 CP2K developers group <https://cp2k.org>                                   !
 !                                                                                                  !
 !   SPDX-License-Identifier: GPL-2.0-or-later                                                      !
 !--------------------------------------------------------------------------------------------------!
@@ -1180,6 +1180,14 @@ CONTAINS
                           variants=(/"KG_POT"/), &
                           description="The name of the non-additive atomic kinetic energy potential.", &
                           usage="KG_POTENTIAL <TNADD-POTENTIAL-NAME>", default_c_val="NONE", n_var=1)
+      CALL section_add_keyword(section, keyword)
+      CALL keyword_release(keyword)
+
+      CALL keyword_create(keyword, __LOCATION__, name="ECP_SEMI_LOCAL", &
+                          description="Use ECPs in the original semi-local form."// &
+                          " This requires the availability of the corresponding integral library."// &
+                          " If set to False, a fully nonlocal one-center expansion of the ECP is constructed.", &
+                          usage="ECP_SEMI_LOCAL {T,F}", default_l_val=.TRUE., lone_keyword_l_val=.TRUE.)
       CALL section_add_keyword(section, keyword)
       CALL keyword_release(keyword)
 

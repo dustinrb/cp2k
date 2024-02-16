@@ -1,6 +1,6 @@
 !--------------------------------------------------------------------------------------------------!
 !   CP2K: A general program to perform molecular dynamics simulations                              !
-!   Copyright 2000-2023 CP2K developers group <https://cp2k.org>                                   !
+!   Copyright 2000-2024 CP2K developers group <https://cp2k.org>                                   !
 !                                                                                                  !
 !   SPDX-License-Identifier: GPL-2.0-or-later                                                      !
 !--------------------------------------------------------------------------------------------------!
@@ -193,7 +193,7 @@ MODULE qs_kind_types
       REAL(KIND=dp)                          :: hard0_radius = 0.8_dp*bohr ! for hard exp of rho0
       REAL(KIND=dp)                          :: max_rad_local = 13.2_dp*bohr ! max GTO radius used in GAPW
       LOGICAL                                :: paw_atom = .FALSE. ! needs atomic rho1
-      LOGICAL                                :: gpw_type_forced = .FALSE. ! gpw atom even if with hard exponents
+      LOGICAL                                :: gpw_r3d_rs_type_forced = .FALSE. ! gpw atom even if with hard exponents
       !
       LOGICAL                                :: ghost = .FALSE.
       LOGICAL                                :: floating = .FALSE.
@@ -388,7 +388,7 @@ CONTAINS
 !> \param max_rad_local ...
 !> \param covalent_radius ...
 !> \param vdw_radius ...
-!> \param gpw_type_forced ...
+!> \param gpw_r3d_rs_type_forced ...
 !> \param harmonics ...
 !> \param max_iso_not0 ...
 !> \param max_s_harm ...
@@ -439,7 +439,7 @@ CONTAINS
                           alpha_core_charge, ccore_charge, core_charge, core_charge_radius, &
                           paw_proj_set, paw_atom, hard_radius, hard0_radius, max_rad_local, &
                           covalent_radius, vdw_radius, &
-                          gpw_type_forced, harmonics, max_iso_not0, max_s_harm, grid_atom, &
+                          gpw_r3d_rs_type_forced, harmonics, max_iso_not0, max_s_harm, grid_atom, &
                           ngrid_ang, ngrid_rad, lmax_rho0, &
                           dft_plus_u_atom, l_of_dft_plus_u, n_of_dft_plus_u, &
                           u_minus_j, U_of_dft_plus_u, J_of_dft_plus_u, &
@@ -471,7 +471,7 @@ CONTAINS
       REAL(KIND=dp), INTENT(OUT), OPTIONAL               :: hard_radius, hard0_radius, &
                                                             max_rad_local, covalent_radius, &
                                                             vdw_radius
-      LOGICAL, INTENT(OUT), OPTIONAL                     :: gpw_type_forced
+      LOGICAL, INTENT(OUT), OPTIONAL                     :: gpw_r3d_rs_type_forced
       TYPE(harmonics_atom_type), OPTIONAL, POINTER       :: harmonics
       INTEGER, INTENT(OUT), OPTIONAL                     :: max_iso_not0, max_s_harm
       TYPE(grid_atom_type), OPTIONAL, POINTER            :: grid_atom
@@ -640,7 +640,7 @@ CONTAINS
 
       IF (PRESENT(paw_proj_set)) paw_proj_set => qs_kind%paw_proj_set
       IF (PRESENT(paw_atom)) paw_atom = qs_kind%paw_atom
-      IF (PRESENT(gpw_type_forced)) gpw_type_forced = qs_kind%gpw_type_forced
+      IF (PRESENT(gpw_r3d_rs_type_forced)) gpw_r3d_rs_type_forced = qs_kind%gpw_r3d_rs_type_forced
       IF (PRESENT(hard_radius)) hard_radius = qs_kind%hard_radius
       IF (PRESENT(hard0_radius)) hard0_radius = qs_kind%hard0_radius
       IF (PRESENT(max_rad_local)) max_rad_local = qs_kind%max_rad_local
@@ -878,8 +878,9 @@ CONTAINS
       CHARACTER(len=default_string_length)               :: my_basis_type
       INTEGER                                            :: ikind, imax, lmax_rho0_kind, &
                                                             max_iso_not0, max_s_harm, n, &
-                                                            ngrid_rad, nkind, nrloc(10)
-      LOGICAL                                            :: dft_plus_u_atom, paw_atom
+                                                            ngrid_rad, nkind, nrloc(10), &
+                                                            nrpot(1:15, 0:10)
+      LOGICAL                                            :: dft_plus_u_atom, ecp_semi_local, paw_atom
       REAL(KIND=dp)                                      :: brcut, zeff, zeff_correction
       TYPE(all_potential_type), POINTER                  :: all_potential
       TYPE(gth_potential_type), POINTER                  :: gth_potential
@@ -950,9 +951,15 @@ CONTAINS
                CALL get_potential(potential=gth_potential, nexp_ppl=n)
                maxlppl = MAX(maxlppl, 2*(n - 1))
             ELSEIF (PRESENT(maxlppl) .AND. ASSOCIATED(sgp_potential)) THEN
-               CALL get_potential(potential=sgp_potential, nrloc=nrloc)
+               CALL get_potential(potential=sgp_potential, nrloc=nrloc, ecp_semi_local=ecp_semi_local)
                n = MAXVAL(nrloc) - 2
                maxlppl = MAX(maxlppl, 2*(n - 1))
+               IF (ecp_semi_local) THEN
+                  CALL get_potential(potential=sgp_potential, sl_lmax=imax, nrpot=nrpot)
+                  n = MAXVAL(nrpot) - 2
+                  n = 2*(n - 1) + imax
+                  maxlppl = MAX(maxlppl, n)
+               END IF
             END IF
 
             IF (PRESENT(maxlppnl) .AND. ASSOCIATED(gth_potential)) THEN
@@ -1016,6 +1023,8 @@ CONTAINS
                END IF
                IF (ASSOCIATED(sgp_potential)) THEN
                   CALL get_potential(potential=sgp_potential, lmax=imax)
+                  maxco = MAX(maxco, ncoset(imax))
+                  CALL get_potential(potential=sgp_potential, sl_lmax=imax)
                   maxco = MAX(maxco, ncoset(imax))
                END IF
             END IF
@@ -1317,7 +1326,7 @@ CONTAINS
 
             CALL get_qs_kind(qs_kind=qs_kind, basis_set=orb_basis)
             CALL get_qs_kind(qs_kind=qs_kind, hard_radius=rc, &
-                             max_rad_local=max_rad_local_type, gpw_type_forced=gpw)
+                             max_rad_local=max_rad_local_type, gpw_r3d_rs_type_forced=gpw)
 
             NULLIFY (soft_basis)
             CALL allocate_gto_basis_set(soft_basis)
@@ -1501,10 +1510,11 @@ CONTAINS
       INTEGER :: handle, i, i_rep, iounit, ipaodesc, ipaopot, ipos, j, jj, k_rep, l, m, n_rep, &
          nb_rep, nexp, ngauss, nlcc, nloc, nnl, norbitals, npaodesc, npaopot, nppnl, nspin, nu, z
       INTEGER, DIMENSION(:), POINTER                     :: add_el, elec_conf, orbitals
-      LOGICAL :: check, explicit, explicit_basis, explicit_J, explicit_kgpot, explicit_potential, &
-         explicit_U, explicit_u_m_j, nobasis, section_enabled, subsection_enabled, update_input
+      LOGICAL :: check, ecp_semi_local, explicit, explicit_basis, explicit_J, explicit_kgpot, &
+         explicit_potential, explicit_U, explicit_u_m_j, nobasis, section_enabled, &
+         subsection_enabled, update_input
       REAL(KIND=dp)                                      :: alpha, ccore, r, rc, zeff_correction
-      REAL(KIND=dp), DIMENSION(3)                        :: error
+      REAL(KIND=dp), DIMENSION(6)                        :: error
       REAL(KIND=dp), DIMENSION(:), POINTER               :: a_nl, aloc, anlcc, cloc, cnlcc, nelec
       REAL(KIND=dp), DIMENSION(:, :), POINTER            :: h_nl
       REAL(KIND=dp), DIMENSION(:, :, :), POINTER         :: c_nl
@@ -1512,7 +1522,8 @@ CONTAINS
       TYPE(atom_sgp_potential_type)                      :: sgppot
       TYPE(atom_upfpot_type)                             :: upfpot
       TYPE(cp_logger_type), POINTER                      :: logger
-      TYPE(gto_basis_set_type), POINTER                  :: sup_basis_set, tmp_basis_set
+      TYPE(gto_basis_set_type), POINTER                  :: orb_basis_set, sup_basis_set, &
+                                                            tmp_basis_set
       TYPE(section_vals_type), POINTER :: basis_section, bs_section, dft_plus_u_section, &
          dft_section, enforce_occupation_section, kgpot_section, pao_desc_section, &
          pao_pot_section, potential_section, spin_section
@@ -1730,6 +1741,10 @@ CONTAINS
          CALL section_vals_val_get(kind_section, i_rep_section=k_rep, &
                                    keyword_name="KG_POTENTIAL", c_val=kgpot_name)
 
+         ! Semi-local vs. full nonlocal form of ECPs
+         CALL section_vals_val_get(kind_section, i_rep_section=k_rep, &
+                                   keyword_name="ECP_SEMI_LOCAL", l_val=ecp_semi_local)
+
          ! Assign atomic covalent radius
          qs_kind%covalent_radius = ptable(z)%covalent_radius*bohr
          CALL section_vals_val_get(kind_section, i_rep_section=k_rep, &
@@ -1779,7 +1794,7 @@ CONTAINS
          IF (qs_kind%ngrid_rad <= 0) &
             CPABORT("# point radial grid < 0")
          CALL section_vals_val_get(kind_section, i_rep_section=k_rep, &
-                                   keyword_name="GPW_TYPE", l_val=qs_kind%gpw_type_forced)
+                                   keyword_name="GPW_TYPE", l_val=qs_kind%gpw_r3d_rs_type_forced)
          CALL section_vals_val_get(kind_section, i_rep_section=k_rep, &
                                    keyword_name="GHOST", l_val=qs_kind%ghost)
          CALL section_vals_val_get(kind_section, i_rep_section=k_rep, &
@@ -2329,25 +2344,38 @@ CONTAINS
                CASE ("ECP")
                   CALL allocate_potential(qs_kind%sgp_potential)
                   CALL get_potential(qs_kind%sgp_potential, description=description)
-                  description(4) = "ECP "//TRIM(potential_name)
                   CALL read_ecp_potential(ptable(z)%symbol, ecppot, &
                                           potential_name, potential_file_name, potential_section)
+                  IF (ecp_semi_local) THEN
+                     description(1) = "Semi-local Gaussian pseudopotential                     "
+                     description(2) = "ECP "//TRIM(potential_name)
+                     description(3) = "LIBGRPP: A. V. Oleynichenko et al., Symmetry 15 197 2023"
+                     description(4) = "                                                        "
+                  ELSE
+                     description(4) = "ECP "//TRIM(potential_name)
+                  END IF
                   CALL set_potential(qs_kind%sgp_potential, name=ecppot%pname, description=description, &
-                                     zeff=ecppot%zion, z=z, ecp_local=.TRUE., &
+                                     zeff=ecppot%zion, z=z, ecp_local=.TRUE., ecp_semi_local=ecp_semi_local, &
                                      nloc=ecppot%nloc, nrloc=ecppot%nrloc, aloc=ecppot%aloc, bloc=ecppot%bloc, &
                                      has_nlcc=.FALSE.)
+                  CALL set_potential(qs_kind%sgp_potential, sl_lmax=ecppot%lmax, &
+                                     npot=ecppot%npot, nrpot=ecppot%nrpot, apot=ecppot%apot, bpot=ecppot%bpot)
                   ! convert PP
-                  CALL sgp_construction(sgp_pot=sgppot, ecp_pot=ecppot, error=error)
-                  IF (iounit > 0) THEN
-                     WRITE (iounit, "(/,T2,'PP Transformation for ',A)") TRIM(ecppot%pname)
-                     IF (sgppot%has_local) THEN
-                        WRITE (iounit, "(T8,'Accuracy for local part:',T61,F20.12)") error(1)
-                     END IF
-                     IF (sgppot%has_nonlocal) THEN
-                        WRITE (iounit, "(T8,'Accuracy for nonlocal part:',T61,F20.12)") error(2)
-                     END IF
-                     IF (sgppot%has_nlcc) THEN
-                        WRITE (iounit, "(T8,'Accuracy for NLCC density:',T61,F20.12)") error(3)
+                  IF (.NOT. ecp_semi_local) THEN
+                     CPABORT("ECPs are only well tested in their semi-local form")
+                     CALL get_qs_kind(qs_kind, basis_set=orb_basis_set)
+                     CALL sgp_construction(sgp_pot=sgppot, ecp_pot=ecppot, orb_basis=orb_basis_set, error=error)
+                     IF (iounit > 0) THEN
+                        WRITE (iounit, "(/,T2,'PP Transformation for ',A)") TRIM(ecppot%pname)
+                        IF (sgppot%has_local) THEN
+                           WRITE (iounit, "(T8,'Accuracy for local part:',T41,F10.3,'%',T61,F20.12)") error(4), error(1)
+                        END IF
+                        IF (sgppot%has_nonlocal) THEN
+                           WRITE (iounit, "(T8,'Accuracy for nonlocal part:',T41,F10.3,'%',T61,F20.12)") error(5), error(2)
+                        END IF
+                        IF (sgppot%has_nlcc) THEN
+                           WRITE (iounit, "(T8,'Accuracy for NLCC density:',T61,F20.12)") error(3)
+                        END IF
                      END IF
                   END IF
                   IF (sgppot%has_nonlocal) THEN
@@ -2362,7 +2390,9 @@ CONTAINS
                      ALLOCATE (a_nl(nnl), h_nl(nnl, 0:l), c_nl(nnl, nnl, 0:l))
                      a_nl(:) = sgppot%a_nonlocal(:)
                      h_nl(:, :) = sgppot%h_nonlocal(:, :)
-                     c_nl(:, :, :) = sgppot%c_nonlocal(:, :, :)
+                     DO l = 0, sgppot%lmax
+                        c_nl(:, :, l) = sgppot%c_nonlocal(:, :, l)*SQRT(2._dp*l + 1.0_dp)
+                     END DO
                      CALL set_potential(qs_kind%sgp_potential, nppnl=nppnl, a_nonlocal=a_nl, h_nonlocal=h_nl, c_nonlocal=c_nl)
                   ELSE
                      CALL set_potential(qs_kind%sgp_potential, n_nonlocal=0, lmax=-1, is_nonlocal=sgppot%is_nonlocal)
@@ -3256,6 +3286,7 @@ CONTAINS
       INTEGER, INTENT(IN)                                :: z
       INTEGER, DIMENSION(0:lmat, 10), INTENT(OUT)        :: ncalc, ncore, nelem
 
+      CHARACTER(LEN=default_string_length)               :: message
       INTEGER                                            :: ii, iounit, l, ll, lmin, nc, nn
       INTEGER, DIMENSION(0:lmat)                         :: econfx
       TYPE(cp_logger_type), POINTER                      :: logger
@@ -3374,12 +3405,23 @@ CONTAINS
          ! if there is still no core, check for special cases
          IF (ncore(0, 1) <= 0) THEN
             IF (z >= 58 .AND. z <= 71) THEN
-               ! 4f-in-core PPs Lathanides
+               ! 4f-in-core PPs for lanthanides
                nc = z - SUM(econf)
                ! setup ncore
                ncore = 0
                SELECT CASE (nc)
-               CASE (47)
+               CASE (29:42)
+                  ncore(0, 1) = 2
+                  ncore(0, 2) = 2
+                  ncore(0, 3) = 2
+                  ncore(1, 1) = 6
+                  ncore(1, 2) = 6
+                  ncore(2, 1) = 10
+                  ncore(3, 1) = nc - 28
+                  message = "A small-core pseudopotential with 4f-in-core is used for the lanthanide "// &
+                            TRIM(ptable(z)%symbol)
+                  CPHINT(TRIM(message))
+               CASE (47:60)
                   ncore(0, 1) = 2
                   ncore(0, 2) = 2
                   ncore(0, 3) = 2
@@ -3389,139 +3431,10 @@ CONTAINS
                   ncore(1, 3) = 6
                   ncore(2, 1) = 10
                   ncore(2, 2) = 10
-                  ncore(3, 1) = 1
-               CASE (48)
-                  ncore(0, 1) = 2
-                  ncore(0, 2) = 2
-                  ncore(0, 3) = 2
-                  ncore(0, 4) = 2
-                  ncore(1, 1) = 6
-                  ncore(1, 2) = 6
-                  ncore(1, 3) = 6
-                  ncore(2, 1) = 10
-                  ncore(2, 2) = 10
-                  ncore(3, 1) = 2
-               CASE (49)
-                  ncore(0, 1) = 2
-                  ncore(0, 2) = 2
-                  ncore(0, 3) = 2
-                  ncore(0, 4) = 2
-                  ncore(1, 1) = 6
-                  ncore(1, 2) = 6
-                  ncore(1, 3) = 6
-                  ncore(2, 1) = 10
-                  ncore(2, 2) = 10
-                  ncore(3, 1) = 3
-               CASE (50)
-                  ncore(0, 1) = 2
-                  ncore(0, 2) = 2
-                  ncore(0, 3) = 2
-                  ncore(0, 4) = 2
-                  ncore(1, 1) = 6
-                  ncore(1, 2) = 6
-                  ncore(1, 3) = 6
-                  ncore(2, 1) = 10
-                  ncore(2, 2) = 10
-                  ncore(3, 1) = 4
-               CASE (51)
-                  ncore(0, 1) = 2
-                  ncore(0, 2) = 2
-                  ncore(0, 3) = 2
-                  ncore(0, 4) = 2
-                  ncore(1, 1) = 6
-                  ncore(1, 2) = 6
-                  ncore(1, 3) = 6
-                  ncore(2, 1) = 10
-                  ncore(2, 2) = 10
-                  ncore(3, 1) = 5
-               CASE (52)
-                  ncore(0, 1) = 2
-                  ncore(0, 2) = 2
-                  ncore(0, 3) = 2
-                  ncore(0, 4) = 2
-                  ncore(1, 1) = 6
-                  ncore(1, 2) = 6
-                  ncore(1, 3) = 6
-                  ncore(2, 1) = 10
-                  ncore(2, 2) = 10
-                  ncore(3, 1) = 6
-               CASE (53)
-                  ncore(0, 1) = 2
-                  ncore(0, 2) = 2
-                  ncore(0, 3) = 2
-                  ncore(0, 4) = 2
-                  ncore(1, 1) = 6
-                  ncore(1, 2) = 6
-                  ncore(1, 3) = 6
-                  ncore(2, 1) = 10
-                  ncore(2, 2) = 10
-                  ncore(3, 1) = 7
-               CASE (54)
-                  ncore(0, 1) = 2
-                  ncore(0, 2) = 2
-                  ncore(0, 3) = 2
-                  ncore(0, 4) = 2
-                  ncore(1, 1) = 6
-                  ncore(1, 2) = 6
-                  ncore(1, 3) = 6
-                  ncore(2, 1) = 10
-                  ncore(2, 2) = 10
-                  ncore(3, 1) = 8
-               CASE (55)
-                  ncore(0, 1) = 2
-                  ncore(0, 2) = 2
-                  ncore(0, 3) = 2
-                  ncore(0, 4) = 2
-                  ncore(1, 1) = 6
-                  ncore(1, 2) = 6
-                  ncore(1, 3) = 6
-                  ncore(2, 1) = 10
-                  ncore(2, 2) = 10
-                  ncore(3, 1) = 9
-               CASE (56)
-                  ncore(0, 1) = 2
-                  ncore(0, 2) = 2
-                  ncore(0, 3) = 2
-                  ncore(0, 4) = 2
-                  ncore(1, 1) = 6
-                  ncore(1, 2) = 6
-                  ncore(1, 3) = 6
-                  ncore(2, 1) = 10
-                  ncore(2, 2) = 10
-                  ncore(3, 1) = 10
-               CASE (57)
-                  ncore(0, 1) = 2
-                  ncore(0, 2) = 2
-                  ncore(0, 3) = 2
-                  ncore(0, 4) = 2
-                  ncore(1, 1) = 6
-                  ncore(1, 2) = 6
-                  ncore(1, 3) = 6
-                  ncore(2, 1) = 10
-                  ncore(2, 2) = 10
-                  ncore(3, 1) = 11
-               CASE (58)
-                  ncore(0, 1) = 2
-                  ncore(0, 2) = 2
-                  ncore(0, 3) = 2
-                  ncore(0, 4) = 2
-                  ncore(1, 1) = 6
-                  ncore(1, 2) = 6
-                  ncore(1, 3) = 6
-                  ncore(2, 1) = 10
-                  ncore(2, 2) = 10
-                  ncore(3, 1) = 12
-               CASE (59)
-                  ncore(0, 1) = 2
-                  ncore(0, 2) = 2
-                  ncore(0, 3) = 2
-                  ncore(0, 4) = 2
-                  ncore(1, 1) = 6
-                  ncore(1, 2) = 6
-                  ncore(1, 3) = 6
-                  ncore(2, 1) = 10
-                  ncore(2, 2) = 10
-                  ncore(3, 1) = 13
+                  ncore(3, 1) = nc - 46
+                  message = "A medium-core pseudopotential with 4f-in-core is used for the lanthanide "// &
+                            TRIM(ptable(z)%symbol)
+                  CPHINT(TRIM(message))
                CASE DEFAULT
                   ncore(0, 1) = -1
                END SELECT

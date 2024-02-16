@@ -7,7 +7,7 @@
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
 project = "CP2K"
-copyright = "2000-2023, CP2K Developers"
+copyright = "2000-2024, CP2K Developers"
 author = "CP2K Developers"
 
 # -- General configuration ---------------------------------------------------
@@ -15,7 +15,12 @@ author = "CP2K Developers"
 
 extensions = ["myst_parser", "sphinx_rtd_theme", "sphinx.ext.mathjax"]
 
-myst_enable_extensions = ["dollarmath"]
+myst_enable_extensions = [
+    "attrs_inline",
+    "dollarmath",
+    "smartquotes",
+    "strikethrough",
+]
 
 templates_path = ["_templates"]
 exclude_patterns = ["_build", "Thumbs.db", ".DS_Store", "README.md"]
@@ -40,6 +45,12 @@ html_context = {
     "github_repo": "cp2k",
     "github_version": "master",
     "conf_py_path": "/docs/",
+}
+
+# https://sphinx-rtd-theme.readthedocs.io/en/stable/configuring.html
+
+html_theme_options = {
+    "collapse_navigation": False,
 }
 
 # EOF

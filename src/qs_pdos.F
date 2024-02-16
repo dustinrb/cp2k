@@ -1,6 +1,6 @@
 !--------------------------------------------------------------------------------------------------!
 !   CP2K: A general program to perform molecular dynamics simulations                              !
-!   Copyright 2000-2023 CP2K developers group <https://cp2k.org>                                   !
+!   Copyright 2000-2024 CP2K developers group <https://cp2k.org>                                   !
 !                                                                                                  !
 !   SPDX-License-Identifier: GPL-2.0-or-later                                                      !
 !--------------------------------------------------------------------------------------------------!
@@ -59,15 +59,10 @@ MODULE qs_pdos
    USE preconditioner_types,            ONLY: preconditioner_type
    USE pw_env_types,                    ONLY: pw_env_get,&
                                               pw_env_type
-   USE pw_pool_types,                   ONLY: pw_pool_create_pw,&
-                                              pw_pool_give_back_pw,&
-                                              pw_pool_p_type,&
+   USE pw_pool_types,                   ONLY: pw_pool_p_type,&
                                               pw_pool_type
-   USE pw_types,                        ONLY: COMPLEXDATA1D,&
-                                              REALDATA3D,&
-                                              REALSPACE,&
-                                              RECIPROCALSPACE,&
-                                              pw_type
+   USE pw_types,                        ONLY: pw_c1d_gs_type,&
+                                              pw_r3d_rs_type
    USE qs_collocate_density,            ONLY: calculate_wavefunction
    USE qs_environment_types,            ONLY: get_qs_env,&
                                               qs_environment_type
@@ -190,10 +185,11 @@ CONTAINS
       TYPE(gto_basis_set_type), POINTER                  :: orb_basis_set
       TYPE(ldos_p_type), DIMENSION(:), POINTER           :: ldos_p
       TYPE(mp_para_env_type), POINTER                    :: para_env
+      TYPE(pw_c1d_gs_type)                               :: wf_g
       TYPE(pw_env_type), POINTER                         :: pw_env
       TYPE(pw_pool_p_type), DIMENSION(:), POINTER        :: pw_pools
       TYPE(pw_pool_type), POINTER                        :: auxbas_pw_pool
-      TYPE(pw_type)                                      :: wf_g, wf_r
+      TYPE(pw_r3d_rs_type)                               :: wf_r
       TYPE(r_ldos_p_type), DIMENSION(:), POINTER         :: r_ldos_p
       TYPE(section_vals_type), POINTER                   :: ldos_section
 
@@ -361,12 +357,8 @@ CONTAINS
          CALL pw_env_get(pw_env, auxbas_pw_pool=auxbas_pw_pool, &
                          pw_pools=pw_pools)
 
-         CALL pw_pool_create_pw(auxbas_pw_pool, wf_r, &
-                                use_data=REALDATA3D, &
-                                in_space=REALSPACE)
-         CALL pw_pool_create_pw(auxbas_pw_pool, wf_g, &
-                                use_data=COMPLEXDATA1D, &
-                                in_space=RECIPROCALSPACE)
+         CALL auxbas_pw_pool%create_pw(wf_r)
+         CALL auxbas_pw_pool%create_pw(wf_g)
          ALLOCATE (read_r(4, n_r_ldos))
          DO ildos = 1, n_r_ldos
             WRITE (r_ldos_index(ildos), '(I0)') ildos
@@ -662,7 +654,7 @@ CONTAINS
                   jy = r_ldos_p(ildos)%ldos%index_grid_local(2, il)
                   jz = r_ldos_p(ildos)%ldos%index_grid_local(3, il)
                   r_ldos_p(ildos)%ldos%pdos_array(imo) = r_ldos_p(ildos)%ldos%pdos_array(imo) + &
-                                                         wf_r%cr3d(jx, jy, jz)*wf_r%cr3d(jx, jy, jz)
+                                                         wf_r%array(jx, jy, jz)*wf_r%array(jx, jy, jz)
                END DO
                r_ldos_p(ildos)%ldos%pdos_array(imo) = r_ldos_p(ildos)%ldos%pdos_array(imo)*dvol
             END IF
@@ -900,8 +892,8 @@ CONTAINS
          DEALLOCATE (read_r)
          DEALLOCATE (r_ldos_p)
          DEALLOCATE (r_ldos_index)
-         CALL pw_pool_give_back_pw(auxbas_pw_pool, wf_r)
-         CALL pw_pool_give_back_pw(auxbas_pw_pool, wf_g)
+         CALL auxbas_pw_pool%give_back_pw(wf_r)
+         CALL auxbas_pw_pool%give_back_pw(wf_g)
       END IF
       IF (do_virt) THEN
          DEALLOCATE (evals_virt)

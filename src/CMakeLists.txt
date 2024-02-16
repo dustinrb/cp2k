@@ -1,6 +1,6 @@
 #!-------------------------------------------------------------------------------------------------!
 #!   CP2K: A general program to perform molecular dynamics simulations                             !
-#!   Copyright 2000-2023 CP2K developers group <https://cp2k.org>                                  !
+#!   Copyright 2000-2024 CP2K developers group <https://cp2k.org>                                  !
 #!                                                                                                 !
 #!   SPDX-License-Identifier: GPL-2.0-or-later                                                     !
 #!-------------------------------------------------------------------------------------------------!
@@ -55,6 +55,7 @@ list(
   atom_optimization.F
   atom_output.F
   atom_pseudo.F
+  atom_set_basis.F
   atom_sgp.F
   atoms_input.F
   atom_types.F
@@ -112,6 +113,7 @@ list(
   ct_methods.F
   ct_types.F
   debug_os_integrals.F
+  deepmd_wrapper.F
   dft_plus_u.F
   dgemm_counter_types.F
   distribution_2d_types.F
@@ -292,6 +294,7 @@ list(
   kpoint_methods.F
   kpoint_transitional.F
   kpoint_types.F
+  libgrpp_integrals.F
   libint_2c_3c.F
   libint_wrapper.F
   library_tests.F
@@ -308,6 +311,7 @@ list(
   lri_optimize_ri_basis_types.F
   ls_matrix_exp.F
   manybody_eam.F
+  manybody_deepmd.F
   manybody_gal21.F
   manybody_gal.F
   manybody_allegro.F
@@ -975,6 +979,8 @@ list(
 
 list(APPEND CP2K_SRCS_C fm/cp_fm_cusolver.c)
 
+list(APPEND CP2K_SRCS_F fm/cp_dlaf_utils_api.F fm/cp_fm_dlaf_api.F)
+
 list(APPEND CP2K_SRCS_F hfxbase/hfx_compression_core_methods.F
      hfxbase/hfx_contract_block.F hfxbase/hfx_contraction_methods.F)
 
@@ -1131,7 +1137,6 @@ list(
   pw_env_methods.F
   pw_env/pw_env_types.F
   pw_env/rs_pw_interface.F
-  pw/fast.F
   pw/fft/fft_kinds.F
   pw/fft/fft_lib.F
   pw/fft/fft_plan.F
@@ -1412,17 +1417,19 @@ list(APPEND CP2K_SRCS_C ${CP2K_DBM_SRCS_C} ${CP2K_GRID_SRCS_C})
 
 # check that the files registered in CMakeLists.txt are all present and return
 # an error otherwise. cmake only runs this test nothing else below
-
 if(CP2K_ENABLE_CONSISTENCY_CHECKS)
   cp2k_compare_src_with_list(
     "${CP2K_FPGA_SRC_C};${CP2K_SRCS_C};${CP2K_OFFLOAD_SRCS_C};${CP2K_DBM_SRCS_C};${CP2K_GRID_SRCS_C};${CP2K_PW_SRCS_C};${CP2K_DBM_SRCS_GPU_C};${CP2K_PROGS_C}"
-    "*.c")
+    "*.c"
+    "${CP2K_EXCLUDED_SRCS_C}")
   cp2k_compare_src_with_list(
-    "${CP2K_SRCS_F};${CP2K_OFFLOAD_SRCS_F};${CP2K_PROGS_F}" "*.F")
+    "${CP2K_SRCS_F};${CP2K_OFFLOAD_SRCS_F};${CP2K_PROGS_F}" "*.F"
+    "${CP2K_EXCLUDED_SRCS_F}")
   cp2k_compare_src_with_list(
     "${CP2K_GRID_SRCS_GPU};${CP2K_GRID_SRCS_HIP};${CP2K_DBM_SRCS_GPU};${CP2K_PW_SRCS_GPU}"
-    "*.cu")
-  cp2k_compare_src_with_list("${CP2K_SRCS_CPP}" "*.cpp")
+    "*.cu"
+    "")
+  cp2k_compare_src_with_list("${CP2K_SRCS_CPP}" "*.cpp" "")
   return()
 endif()
 
@@ -1558,6 +1565,7 @@ target_link_libraries(
     $<$<BOOL:${CP2K_USE_TORCH}>:${TORCH_LIBRARIES}>
     $<$<BOOL:${CP2K_USE_COSMA}>:cosma::cosma_prefixed_pxgemm>
     $<$<BOOL:${CP2K_USE_COSMA}>:cosma::cosma>
+    $<$<BOOL:${CP2K_USE_DLAF}>:DLAF::DLAF>
     DBCSR::dbcsr
     $<$<BOOL:${CP2K_USE_MPI}>:cp2k::SCALAPACK::scalapack>
     cp2k_linalg_libs
@@ -1565,48 +1573,55 @@ target_link_libraries(
 
 string(TIMESTAMP CP2K_TIMESTAMP "%Y-%m-%d %H:%M:%S")
 
+if(CP2K_DATA_DIR STREQUAL "default")
+  set(CP2K_DATA_DIR "${CMAKE_INSTALL_FULL_DATAROOTDIR}/${PROJECT_NAME}/data")
+endif()
+
 target_link_libraries(cp2k PUBLIC cp2k_link_libs)
 target_compile_definitions(
   cp2k
-  PUBLIC $<$<BOOL:${CP2K_USE_MPI}>:__parallel>
-         $<$<BOOL:${CP2K_USE_MPI}>:__SCALAPACK>
-         $<$<BOOL:${CP2K_USE_MPI_F08}>:__MPI_F08>
-         __COMPILE_DATE=\"${CP2K_TIMESTAMP}\"
-         __COMPILE_HOST=\"${CP2K_HOST_NAME}\"
-         __COMPILE_REVISION=\"${CP2K_GIT_HASH}\"
-         __DATA_DIR=\"${CMAKE_INSTALL_FULL_DATAROOTDIR}/cp2k/data\"
-         __COMPILE_ARCH=\"${CMAKE_SYSTEM_PROCESSOR}\"
-         $<$<CONFIG:Release>:NDEBUG>
-         $<$<CONFIG:COVERAGE>:__NO_ABORT>
-         $<$<CONFIG:DEBUG>:__HAS_IEEE_EXCEPTIONS>
-         $<$<CONFIG:DEBUG>:__CHECK_DIAG>
-         $<$<BOOL:${CP2K_USE_PEXSI}>:__PEXSI>
-         $<$<BOOL:${CP2K_USE_PLUMED2}>:__PLUMED2>
-         $<$<BOOL:${CP2K_USE_QUIP}>:__QUIP>
-         $<$<BOOL:${CP2K_USE_MAXWELL}>:__LIBMAXWELL>
-         $<$<BOOL:${CP2K_USE_VORI}>:__LIBVORI>
-         $<$<BOOL:${CP2K_USE_SPGLIB}>:__SPGLIB>
-         $<$<BOOL:${CP2K_USE_SIRIUS}>:__SIRIUS>
-         $<$<BOOL:${CP2K_USE_SPLA}>:__SPLA>
-         $<$<BOOL:${CP2K_USE_SpFFT}>:__SPFFT>
-         $<$<BOOL:${CP2K_USE_SPLA_GEMM_OFFLOADING}>:__OFFLOAD_GEMM>
-         $<$<BOOL:${CP2K_USE_ELPA}>:__ELPA>
-         $<$<BOOL:${CP2K_USE_LIBXC}>:__LIBXC>
-         $<$<BOOL:${CP2K_USE_FFTW3_}>:__FFTW3>
-         $<$<BOOL:${CP2K_USE_LIBINT2}>:__LIBINT>
-         $<$<BOOL:${CP2K_USE_PEXSI}>:__LIBPEXSI>
-         $<$<BOOL:${CP2K_USE_LIBTORCH}>:__LIBTORCH>
-         $<$<BOOL:${CP2K_USE_COSMA}>:__COSMA>
-         $<$<BOOL:${CP2K_USE_LIBXSMM}>:__LIBXSMM>
-         $<$<STREQUAL:${CP2K_BLAS_VENDOR},MKL>:__MKL>
-         $<$<STREQUAL:${CP2K_BLAS_VENDOR},Apple>:__ACCELERATE>
-         $<$<BOOL:${CP2K_USE_CUSOLVER_MP}>:__CUSOLVERMP>
-         $<$<BOOL:${CP2K_USE_CUDA}>:__OFFLOAD_CUDA>
-         $<$<COMPILE_LANGUAGE:CUDA>:__OFFLOAD_CUDA>
-         $<$<BOOL:${CP2K_USE_HIP}>:__HIP_PLATFORM_AMD__
-         __OFFLOAD_HIP>
-         $<$<COMPILE_LANGUAGE:HIP>:__HIP_PLATFORM_AMD__
-         __OFFLOAD_HIP>)
+  PUBLIC
+    $<$<BOOL:${CP2K_USE_MPI}>:__parallel>
+    $<$<BOOL:${CP2K_USE_MPI}>:__SCALAPACK>
+    $<$<BOOL:${CP2K_USE_MPI_F08}>:__MPI_F08>
+    __COMPILE_DATE=\"${CP2K_TIMESTAMP}\"
+    __COMPILE_HOST=\"${CP2K_HOST_NAME}\"
+    __COMPILE_REVISION=\"${CP2K_GIT_HASH}\"
+    __DATA_DIR=\"${CP2K_DATA_DIR}\"
+    __COMPILE_ARCH=\"${CMAKE_SYSTEM_PROCESSOR}\"
+    $<$<CONFIG:COVERAGE>:__NO_ABORT>
+    $<$<CONFIG:DEBUG>:__HAS_IEEE_EXCEPTIONS>
+    $<$<CONFIG:DEBUG>:__CHECK_DIAG>
+    $<$<BOOL:${CP2K_USE_PEXSI}>:__PEXSI>
+    $<$<BOOL:${CP2K_USE_PLUMED2}>:__PLUMED2>
+    $<$<BOOL:${CP2K_USE_QUIP}>:__QUIP>
+    $<$<BOOL:${CP2K_USE_MAXWELL}>:__LIBMAXWELL>
+    $<$<BOOL:${CP2K_USE_VORI}>:__LIBVORI>
+    $<$<BOOL:${CP2K_USE_SPGLIB}>:__SPGLIB>
+    $<$<BOOL:${CP2K_USE_SIRIUS}>:__SIRIUS>
+    $<$<BOOL:${CP2K_USE_SPLA}>:__SPLA>
+    $<$<BOOL:${CP2K_USE_SpFFT}>:__SPFFT>
+    $<$<BOOL:${CP2K_USE_SPLA_GEMM_OFFLOADING}>:__OFFLOAD_GEMM>
+    $<$<BOOL:${CP2K_USE_ELPA}>:__ELPA>
+    $<$<BOOL:${CP2K_USE_DLAF}>:__DLAF>
+    $<$<BOOL:${CP2K_USE_LIBXC}>:__LIBXC>
+    $<$<OR:$<BOOL:${CP2K_USE_FFTW3_}>,$<BOOL:${CP2K_USE_FFTW3_MKL_}>>:__FFTW3>
+    $<$<BOOL:${CP2K_USE_FFTW3_MKL_}>:__FFTW3_MKL>
+    $<$<BOOL:${CP2K_USE_LIBINT2}>:__LIBINT>
+    $<$<BOOL:${CP2K_USE_PEXSI}>:__LIBPEXSI>
+    $<$<BOOL:${CP2K_USE_LIBTORCH}>:__LIBTORCH>
+    $<$<BOOL:${CP2K_USE_COSMA}>:__COSMA>
+    $<$<BOOL:${CP2K_USE_LIBXSMM}>:__LIBXSMM>
+    $<$<STREQUAL:${CP2K_BLAS_VENDOR},MKL>:__MKL>
+    $<$<STREQUAL:${CP2K_BLAS_VENDOR},Apple>:__ACCELERATE>
+    $<$<BOOL:${CP2K_USE_CUSOLVER_MP}>:__CUSOLVERMP>
+    $<$<BOOL:${CP2K_USE_CUDA}>:__OFFLOAD_CUDA>
+    $<$<COMPILE_LANGUAGE:CUDA>:__OFFLOAD_CUDA>
+    $<$<BOOL:${CP2K_USE_HIP}>:__HIP_PLATFORM_AMD__
+    __OFFLOAD_HIP>
+    $<$<BOOL:${CP2K_USE_UNIFIED_MEMORY}>:__OFFLOAD_UNIFIED_MEMORY>
+    $<$<COMPILE_LANGUAGE:HIP>:__HIP_PLATFORM_AMD__
+    __OFFLOAD_HIP>)
 
 if(CP2K_USE_CUDA OR CP2K_USE_HIP)
   # these checks are only relevant when the debug mode is on
@@ -1686,9 +1701,8 @@ endforeach()
 add_executable(dbm_miniapp dbm/dbm_miniapp.c ${CP2K_DBM_SRCS_C}
                            ${CP2K_DBM_SRCS_GPU} ${CP2K_OFFLOAD_SRCS_C})
 target_compile_definitions(
-  dbm_miniapp
-  PRIVATE $<$<CONFIG:Release>:NDEBUG> $<$<BOOL:${CP2K_USE_LIBXSMM}>:__LIBXSMM>
-          $<$<STREQUAL:${CP2K_BLAS_VENDOR},"MKL">:__MKL>)
+  dbm_miniapp PRIVATE $<$<BOOL:${CP2K_USE_LIBXSMM}>:__LIBXSMM>
+                      $<$<STREQUAL:${CP2K_BLAS_VENDOR},"MKL">:__MKL>)
 
 if(CP2K_DISABLE_DBM_GPU)
   target_compile_definitions(dbm_miniapp PRIVATE __NO_OFFLOAD_DBM)
@@ -1705,10 +1719,8 @@ foreach(__app grid_miniapp grid_unittest)
     $<$<BOOL:${CP2K_USE_HIP}>:${CP2K_GRID_SRCS_HIP}>
     ${CP2K_OFFLOAD_SRCS_C})
   target_compile_definitions(
-    ${__app}
-    PRIVATE $<$<CONFIG:Release>:NDEBUG>
-            $<$<BOOL:${CP2K_USE_LIBXSMM}>:__LIBXSMM>
-            $<$<STREQUAL:${CP2K_BLAS_VENDOR},"MKL">:__MKL>)
+    ${__app} PRIVATE $<$<BOOL:${CP2K_USE_LIBXSMM}>:__LIBXSMM>
+                     $<$<STREQUAL:${CP2K_BLAS_VENDOR},"MKL">:__MKL>)
 
   if(CP2K_DISABLE_GRID_GPU)
     target_compile_definitions(${__app} PUBLIC __NO_OFFLOAD_GRID)
@@ -1769,8 +1781,7 @@ install(
   INCLUDES
   DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/${PROJECT_NAME}")
 
-install(DIRECTORY "${CMAKE_SOURCE_DIR}/data"
-        DESTINATION "${CMAKE_INSTALL_FULL_DATAROOTDIR}/${PROJECT_NAME}")
+install(DIRECTORY "${CMAKE_SOURCE_DIR}/data/" DESTINATION "${CP2K_DATA_DIR}")
 
 # ##############################################################################
 # cp2kConfig.cmake, etc...

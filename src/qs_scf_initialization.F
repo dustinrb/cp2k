@@ -1,6 +1,6 @@
 !--------------------------------------------------------------------------------------------------!
 !   CP2K: A general program to perform molecular dynamics simulations                              !
-!   Copyright 2000-2023 CP2K developers group <https://cp2k.org>                                   !
+!   Copyright 2000-2024 CP2K developers group <https://cp2k.org>                                   !
 !                                                                                                  !
 !   SPDX-License-Identifier: GPL-2.0-or-later                                                      !
 !--------------------------------------------------------------------------------------------------!
@@ -54,7 +54,7 @@ MODULE qs_scf_initialization
    USE kinds,                           ONLY: dp
    USE kpoint_types,                    ONLY: kpoint_type
    USE message_passing,                 ONLY: mp_para_env_type
-   USE pw_types,                        ONLY: pw_type
+   USE pw_types,                        ONLY: pw_c1d_gs_type
    USE qmmm_image_charge,               ONLY: conditional_calc_image_matrix
    USE qs_block_davidson_types,         ONLY: block_davidson_allocate,&
                                               block_davidson_env_create
@@ -228,7 +228,7 @@ CONTAINS
       TYPE(qs_environment_type), POINTER                 :: qs_env
       TYPE(qs_scf_env_type), POINTER                     :: scf_env
 
-      TYPE(pw_type), DIMENSION(:), POINTER               :: rho_g
+      TYPE(pw_c1d_gs_type), DIMENSION(:), POINTER        :: rho_g
       TYPE(qs_rho_type), POINTER                         :: rho
 
       NULLIFY (rho_g)

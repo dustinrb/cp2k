@@ -39,7 +39,7 @@ def main() -> None:
         f.write(toolchain_full() + regtest("sdbg", "minimal"))
 
     with OutputFile(f"Dockerfile.test_cmake", args.check) as f:
-        f.write(toolchain_full() + regtest_cmake())
+        f.write(spack_env_toolchain() + regtest_cmake())
 
     for version in "ssmp", "psmp":
         with OutputFile(f"Dockerfile.test_asan-{version}", args.check) as f:
@@ -51,8 +51,16 @@ def main() -> None:
 
     for gcc_version in 8, 9, 10, 11, 12:
         with OutputFile(f"Dockerfile.test_gcc{gcc_version}", args.check) as f:
-            img = "ubuntu:22.04" if gcc_version > 8 else "ubuntu:20.04"
-            f.write(toolchain_ubuntu_nompi(base_image=img, gcc_version=gcc_version))
+            if gcc_version > 8:
+                f.write(toolchain_ubuntu_nompi(gcc_version=gcc_version))
+            else:
+                f.write(
+                    toolchain_ubuntu_nompi(
+                        base_image="ubuntu:20.04",
+                        gcc_version=gcc_version,
+                        libgrpp=False,
+                    )
+                )
             # Skip some tests because of bug in LDA_C_PMGB06 functional in libxc <5.2.0.
             f.write(regtest("ssmp", testopts="--skipdir=QS/regtest-rs-dhft"))
 
@@ -66,6 +74,7 @@ def main() -> None:
                 base_image="arm64v8/ubuntu:22.04",
                 with_libxsmm="no",
                 with_libtorch="no",
+                with_deepmd="no",
             )
         )
         f.write(regtest("psmp"))
@@ -110,30 +119,6 @@ def main() -> None:
         with OutputFile(f"Dockerfile.test_{name}", args.check) as f:
             f.write(test_without_build(name))
 
-    with OutputFile(f"Dockerfile.gcc_spack", args.check) as f:
-        f.write(
-            spack_toolchain(
-                distro="ubuntu:22.04",
-                spec="cp2k@master%gcc build_system=cmake +enable_regtests+cosma+mpi+openmp+sirius+elpa+libxc+libint+plumed+pexsi+spglib ^openblas+fortran ^cosma+scalapack+shared ^dbcsr+mpi+shared",
-            )
-        )
-
-    with OutputFile(f"Dockerfile.gcc_spack_cuda", args.check) as f:
-        f.write(
-            spack_toolchain(
-                distro="nvidia/cuda:12.2.0-devel-ubuntu22.04",
-                spec="cp2k@master%gcc build_system=cmake +libxc+libint+sirius+elpa+plumed+pexsi+spglib+cosma+mpi+openmp+cuda cuda_arch=60  smm=libxsmm ^openblas+fortran ^cosma+scalapack+shared+cuda ^dbcsr+cuda~shared cuda_arch=60 ^sirius+cuda",
-            )
-        )
-
-    with OutputFile(f"Dockerfile.gcc_spack_rocm", args.check) as f:
-        f.write(
-            spack_toolchain(
-                distro="rocm/dev-ubuntu-22.04:5.6.1-complete",
-                spec="cp2k@master%gcc build_system=cmake +sirius +elpa +libxc +libint smm=libxsmm +spglib +cosma +rocm amdgpu_target=gfx90a +pexsi +plumed +openmp ^openblas+fortran ^dbcsr+mpi+rocm~shared+openmp amdgpu_target=gfx906 ^cosma+shared~tests~apps+rocm",
-            )
-        )
-
 
 # ======================================================================================
 def regtest(
@@ -158,11 +143,6 @@ RUN /bin/bash -o pipefail -c " \
 def regtest_cmake(testopts: str = "") -> str:
     return (
         rf"""
-# Install DBCSR.
-WORKDIR /opt/dbcsr
-COPY ./tools/docker/scripts/install_dbcsr.sh .
-RUN ./install_dbcsr.sh
-
 # Install CP2K sources.
 WORKDIR /opt/cp2k
 COPY ./src ./src
@@ -417,6 +397,7 @@ def toolchain_full(
 def toolchain_ubuntu_nompi(
     base_image: str = "ubuntu:22.04",
     gcc_version: int = 12,
+    libgrpp: bool = True,
     libvori: bool = True,
 ) -> str:
     output = rf"""
@@ -455,6 +436,7 @@ RUN ln -sf /usr/bin/gcc-{gcc_version}      /usr/local/bin/gcc  && \
         with_openblas="system",
         with_gsl="system",
         with_hdf5="system",
+        with_libgrpp=("install" if libgrpp else "no"),
         with_libint=("system" if gcc_version > 8 else "install"),
         with_libxc=("system" if gcc_version > 8 else "install"),
         with_libxsmm="install",
@@ -467,6 +449,9 @@ RUN ln -sf /usr/bin/gcc-{gcc_version}      /usr/local/bin/gcc  && \
 def toolchain_intel() -> str:
     return rf"""
 FROM intel/oneapi-hpckit:2023.2.1-devel-ubuntu22.04
+
+# Workaround expired key.
+RUN curl -sS https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor > /usr/share/keyrings/intel-oneapi-archive-keyring.gpg
 
 """ + install_toolchain(
         base_image="ubuntu",
@@ -750,73 +735,64 @@ RUN ./scripts/generate_arch_files.sh && rm -rf ./build
 """.lstrip()
 
 
-def spack_toolchain(distro: str, spec: str) -> str:
+# ======================================================================================
+def spack_env_toolchain() -> str:
     return rf"""
-FROM {distro} as builder
-ENV DEBIAN_FRONTEND noninteractive
+FROM ubuntu:22.04
 
-# only the the two next lines are ubuntu specific
-RUN apt-get update -qq
-RUN apt-get install -qq --no-install-recommends autoconf autogen automake autotools-dev bzip2 ca-certificates g++ gcc gfortran git less libtool libtool-bin make nano patch pkg-config python3 unzip wget xxd zlib1g-dev cmake gnupg m4 xz-utils libssl-dev libssh-dev openmpi-common libopenmpi-dev 
+# Install common dependencies as pre-built Ubuntu packages.
+RUN apt-get update -qq && apt-get install -qq --no-install-recommends \
+    autoconf \
+    autogen \
+    automake \
+    autotools-dev \
+    bzip2 \
+    ca-certificates \
+    g++ \
+    gcc \
+    gfortran \
+    git \
+    less \
+    libtool \
+    libtool-bin \
+    make \
+    nano \
+    ninja-build \
+    patch \
+    pkgconf \
+    python3 \
+    unzip \
+    wget \
+    xxd \
+    zlib1g-dev \
+    cmake \
+    gnupg \
+    m4 \
+    xz-utils \
+    libssl-dev \
+    libssh-dev \
+    hwloc \
+    libhwloc-dev \
+   && rm -rf /var/lib/apt/lists/*
 
+# Install a recent developer version of Spack.
+WORKDIR /opt/spack
+RUN git init --quiet && \
+    git remote add origin https://github.com/spack/spack.git && \
+    git fetch --quiet --depth 1 origin 8bcb1f8766ffbf097ec685bdafad53bc8b6e9e30 && \
+    git checkout --quiet FETCH_HEAD
+ENV PATH="/opt/spack/bin:${{PATH}}"
 
-RUN wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_386 && chmod a+x /usr/local/bin/yq
-ENV FORCE_UNSAFE_CONFIGURE 1
-
-ENV PATH="/spack/bin:${{PATH}}"
-ENV MPICH_VERSION=4.0.3
-
-# get latest version of spack
-RUN git clone https://github.com/spack/spack.git
-
-# set the location of packages built by spack
-RUN spack config add config:install_tree:root:/opt/spack
-
-# find all external packages but exclude python
-RUN spack external find --all --exclude python
-
-# find compilers
+# Find all external packages and compilers.
+RUN spack external find --all --not-buildable 
 RUN spack compiler find
 
-# tweaking the arguments
-RUN yq -i '.compilers[0].compiler.flags.fflags = "-fallow-argument-mismatch"' /root/.spack/linux/compilers.yaml
-#RUN spack config add packages:all:target:x86_64
-# set amdgpu_target for all packages
-# RUN spack config add packages:all:variants:amdgpu_target=gfx90a
-
-# install few dependencies to help with docker caching
-RUN spack install cmake@3.27.3
-RUN spack install openblas+fortran
-RUN spack install libxsmm
-RUN spack install libxc
-RUN spack install gsl
-RUN spack install py-fypp
-RUN spack install spglib
-RUN spack install libvori
-
-ENV SPEC_OPENBLAS="{spec}"
-
-# instal all dependencies
-RUN mkdir /cp2k-src
-COPY . /cp2k-src
-
-RUN spack repo add /cp2k-src/tools/spack 
-RUN spack env create --with-view /opt/cp2k cp2k-env
-RUN spack install --only=dependencies --fail-fast $SPEC_OPENBLAS ^openmpi
-
-# copy source files of the pull request into container
-RUN spack --color always -e cp2k-env dev-build -q --source-path /cp2k-src $SPEC_OPENBLAS ^openmpi
-
-# Build CP2K with CMake and run regression tests.
-ARG TESTOPTS=""
-RUN /bin/bash -o pipefail -c " \
-    TESTOPTS='${{TESTOPTS}}' \
-    /cp2k-src/tools/docker/scripts/test_regtest_spack.sh |& tee report.log && \
-    rm -rf regtesting"
-
-# Output the report if the image is old and was therefore pulled from the build cache.
-CMD cat $(find ./report.log -mmin +10) | sed '/^Summary:/ s/$/ (cached)/'
-ENTRYPOINT []
+# Install CP2K's dependencies via Spack.
+WORKDIR /
+COPY ./tools/spack/cp2k-dependencies.yaml .
+RUN spack env create myenv ./cp2k-dependencies.yaml
+RUN spack -e myenv concretize -f
+RUN spack -e myenv env depfile -o spack-makefile && make -j32 --file=spack-makefile SPACK_COLOR=never --output-sync=recurse
 """
 
 

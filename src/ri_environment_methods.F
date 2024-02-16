@@ -1,6 +1,6 @@
 !--------------------------------------------------------------------------------------------------!
 !   CP2K: A general program to perform molecular dynamics simulations                              !
-!   Copyright 2000-2023 CP2K developers group <https://cp2k.org>                                   !
+!   Copyright 2000-2024 CP2K developers group <https://cp2k.org>                                   !
 !                                                                                                  !
 !   SPDX-License-Identifier: GPL-2.0-or-later                                                      !
 !--------------------------------------------------------------------------------------------------!
@@ -39,7 +39,8 @@ MODULE ri_environment_methods
                                               lri_kind_type
    USE message_passing,                 ONLY: mp_comm_type,&
                                               mp_para_env_type
-   USE pw_types,                        ONLY: pw_type
+   USE pw_types,                        ONLY: pw_c1d_gs_type,&
+                                              pw_r3d_rs_type
    USE qs_collocate_density,            ONLY: calculate_lri_rho_elec
    USE qs_environment_types,            ONLY: get_qs_env,&
                                               qs_environment_type,&
@@ -372,7 +373,8 @@ CONTAINS
       REAL(KIND=dp), DIMENSION(:, :), POINTER            :: avec
       TYPE(lri_density_type), POINTER                    :: lri_density
       TYPE(lri_kind_type), DIMENSION(:), POINTER         :: lri_coef
-      TYPE(pw_type), DIMENSION(:), POINTER               :: rho_g, rho_r
+      TYPE(pw_c1d_gs_type), DIMENSION(:), POINTER        :: rho_g
+      TYPE(pw_r3d_rs_type), DIMENSION(:), POINTER        :: rho_r
 
       CALL timeset(routineN, handle)
 

@@ -1,6 +1,6 @@
 !--------------------------------------------------------------------------------------------------!
 !   CP2K: A general program to perform molecular dynamics simulations                              !
-!   Copyright 2000-2023 CP2K developers group <https://cp2k.org>                                   !
+!   Copyright 2000-2024 CP2K developers group <https://cp2k.org>                                   !
 !                                                                                                  !
 !   SPDX-License-Identifier: GPL-2.0-or-later                                                      !
 !--------------------------------------------------------------------------------------------------!
@@ -874,6 +874,13 @@ MODULE input_constants
    ! Define scaling of the exchange correction
    INTEGER, PARAMETER, PUBLIC               :: do_admm_exch_scaling_none = 0, &
                                                do_admm_exch_scaling_merlot = 1
+   ! ADMM TYPES
+   INTEGER, PARAMETER, PUBLIC               :: no_admm_type = 0, &
+                                               admm1_type = 1, &
+                                               admm2_type = 2, &
+                                               admms_type = 3, &
+                                               admmp_type = 4, &
+                                               admmq_type = 5
 
    ! Define DFT+U method identifier codes
    INTEGER, PARAMETER, PUBLIC               :: plus_u_lowdin = 1, &

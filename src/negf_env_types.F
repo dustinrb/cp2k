@@ -1,6 +1,6 @@
 !--------------------------------------------------------------------------------------------------!
 !   CP2K: A general program to perform molecular dynamics simulations                              !
-!   Copyright 2000-2023 CP2K developers group <https://cp2k.org>                                   !
+!   Copyright 2000-2024 CP2K developers group <https://cp2k.org>                                   !
 !                                                                                                  !
 !   SPDX-License-Identifier: GPL-2.0-or-later                                                      !
 !--------------------------------------------------------------------------------------------------!
@@ -53,12 +53,8 @@ MODULE negf_env_types
    USE particle_types,                  ONLY: particle_type
    USE pw_env_types,                    ONLY: pw_env_get,&
                                               pw_env_type
-   USE pw_pool_types,                   ONLY: pw_pool_create_pw,&
-                                              pw_pool_give_back_pw,&
-                                              pw_pool_type
-   USE pw_types,                        ONLY: REALDATA3D,&
-                                              REALSPACE,&
-                                              pw_type
+   USE pw_pool_types,                   ONLY: pw_pool_type
+   USE pw_types,                        ONLY: pw_r3d_rs_type
    USE qs_density_mixing_types,         ONLY: mixing_storage_create,&
                                               mixing_storage_release,&
                                               mixing_storage_type
@@ -178,7 +174,7 @@ CONTAINS
       TYPE(force_env_p_type), DIMENSION(:), POINTER      :: sub_force_env
       TYPE(negf_atom_map_contact_type), ALLOCATABLE, &
          DIMENSION(:)                                    :: map_contact
-      TYPE(pw_type), POINTER                             :: v_hartree_rspace
+      TYPE(pw_r3d_rs_type), POINTER                      :: v_hartree_rspace
       TYPE(qs_environment_type), POINTER                 :: qs_env, qs_env_contact
       TYPE(qs_subsys_type), POINTER                      :: subsys, subsys_contact
 
@@ -718,7 +714,7 @@ CONTAINS
       TYPE(mp_para_env_type), POINTER                    :: para_env
       TYPE(pw_env_type), POINTER                         :: pw_env
       TYPE(pw_pool_type), POINTER                        :: pw_pool
-      TYPE(pw_type)                                      :: v_hartree
+      TYPE(pw_r3d_rs_type)                               :: v_hartree
       TYPE(qs_subsys_type), POINTER                      :: subsys
 
       CALL timeset(routineN, handle)
@@ -797,13 +793,13 @@ CONTAINS
          CALL dbcsr_copy(matrix_b=hmat%matrix, matrix_a=matrix_s_kp(1, 1)%matrix)
          CALL dbcsr_set(hmat%matrix, 0.0_dp)
 
-         CALL pw_pool_create_pw(pw_pool, v_hartree, use_data=REALDATA3D, in_space=REALSPACE)
+         CALL pw_pool%create_pw(v_hartree)
          CALL negf_env_init_v_hartree(v_hartree, negf_env%contacts, negf_control%contacts)
 
          CALL integrate_v_rspace(v_rspace=v_hartree, hmat=hmat, qs_env=qs_env, &
                                  calculate_forces=.FALSE., compute_tau=.FALSE., gapw=.FALSE.)
 
-         CALL pw_pool_give_back_pw(pw_pool, v_hartree)
+         CALL pw_pool%give_back_pw(v_hartree)
 
          CALL negf_copy_sym_dbcsr_to_fm_submat(matrix=hmat%matrix, &
                                                fm=negf_env%v_hartree_s, &
@@ -845,7 +841,7 @@ CONTAINS
 !> \author Sergey Chulkov
 ! **************************************************************************************************
    SUBROUTINE negf_env_init_v_hartree(v_hartree, contact_env, contact_control)
-      TYPE(pw_type), INTENT(IN)                          :: v_hartree
+      TYPE(pw_r3d_rs_type), INTENT(IN)                   :: v_hartree
       TYPE(negf_env_contact_type), DIMENSION(:), &
          INTENT(in)                                      :: contact_env
       TYPE(negf_control_contact_type), DIMENSION(:), &
@@ -917,7 +913,7 @@ CONTAINS
                   END DO
                END IF
 
-               v_hartree%cr3d(ix, iy, iz) = pot*dvol
+               v_hartree%array(ix, iy, iz) = pot*dvol
             END DO
          END DO
       END DO

@@ -1,6 +1,6 @@
 !--------------------------------------------------------------------------------------------------!
 !   CP2K: A general program to perform molecular dynamics simulations                              !
-!   Copyright 2000-2023 CP2K developers group <https://cp2k.org>                                   !
+!   Copyright 2000-2024 CP2K developers group <https://cp2k.org>                                   !
 !                                                                                                  !
 !   SPDX-License-Identifier: GPL-2.0-or-later                                                      !
 !--------------------------------------------------------------------------------------------------!
@@ -128,7 +128,7 @@ CONTAINS
       CALL ewald_env_get(ewald_env, alpha=alpha, group=group)
       CALL ewald_pw_get(ewald_pw, pw_big_pool=pw_pool, dg=dg)
       CALL dg_get(dg, dg_rho0=dg_rho0)
-      rho0 => dg_rho0%density%cr3d
+      rho0 => dg_rho0%density%array
       pw_grid => pw_pool%pw_grid
       bds => pw_grid%bounds
 

@@ -1,6 +1,6 @@
 !--------------------------------------------------------------------------------------------------!
 !   CP2K: A general program to perform molecular dynamics simulations                              !
-!   Copyright 2000-2023 CP2K developers group <https://cp2k.org>                                   !
+!   Copyright 2000-2024 CP2K developers group <https://cp2k.org>                                   !
 !                                                                                                  !
 !   SPDX-License-Identifier: GPL-2.0-or-later                                                      !
 !--------------------------------------------------------------------------------------------------!
@@ -54,6 +54,7 @@ MODULE pwdft_environment_types
 ! **************************************************************************************************
    TYPE pwdft_energy_type
       REAL(KIND=dp)                                    :: etotal = 0.0_dp
+      REAL(KIND=dp)                                    :: band_gap = -1.0_dp
    END TYPE pwdft_energy_type
 
 ! **************************************************************************************************

@@ -1,6 +1,6 @@
 !--------------------------------------------------------------------------------------------------!
 !   CP2K: A general program to perform molecular dynamics simulations                              !
-!   Copyright 2000-2023 CP2K developers group <https://cp2k.org>                                   !
+!   Copyright 2000-2024 CP2K developers group <https://cp2k.org>                                   !
 !                                                                                                  !
 !   SPDX-License-Identifier: GPL-2.0-or-later                                                      !
 !--------------------------------------------------------------------------------------------------!
@@ -41,14 +41,10 @@ MODULE qs_environment
                                               qs_control_type,&
                                               semi_empirical_control_type,&
                                               xtb_control_type
-   USE cp_control_utils,                ONLY: read_ddapc_section,&
-                                              read_dft_control,&
-                                              read_mgrid_section,&
-                                              read_qs_section,&
-                                              read_tddfpt2_control,&
-                                              read_tddfpt_control,&
-                                              write_dft_control,&
-                                              write_qs_control
+   USE cp_control_utils,                ONLY: &
+        read_ddapc_section, read_dft_control, read_mgrid_section, read_qs_section, &
+        read_tddfpt2_control, read_tddfpt_control, write_admm_control, write_dft_control, &
+        write_qs_control
    USE cp_ddapc_types,                  ONLY: cp_ddapc_ewald_create
    USE cp_log_handling,                 ONLY: cp_get_default_logger,&
                                               cp_logger_get_default_io_unit,&
@@ -677,8 +673,11 @@ CONTAINS
       ! set periodicity flag
       dft_control%qs_control%periodicity = SUM(cell%perd)
 
-      !   *** Read the input section with the Quickstep control parameters ***
+      !  Read the input section with the Quickstep control parameters
       CALL read_qs_section(dft_control%qs_control, qs_section)
+      IF (dft_control%do_sccs .AND. dft_control%qs_control%gapw) THEN
+         CPABORT("SCCS is not yet implemented with GAPW")
+      END IF
       CALL get_qs_env(qs_env=qs_env, do_kpoints=do_kpoints)
       IF (do_kpoints) THEN
          ! reset some of the settings for wfn extrapolation for kpoints
@@ -941,8 +940,6 @@ CONTAINS
                                 basis_type="RI_AUX")
                IF (.NOT. (ASSOCIATED(ri_aux_basis_set))) THEN
                   ! RI_AUX basis set is not yet loaded
-                  CALL cp_warn(__LOCATION__, "Automatic Generation of RI_AUX basis. "// &
-                               "This is experimental code.")
                   ! Generate a default basis
                   CALL create_ri_aux_basis_set(ri_aux_basis_set, qs_kind, dft_control%auto_basis_ri_aux, basis_sort=sort_basis)
                   CALL add_basis_set_to_container(qs_kind%basis_sets, ri_aux_basis_set, "RI_AUX")
@@ -960,8 +957,6 @@ CONTAINS
             qs_kind => qs_kind_set(ikind)
             CALL get_qs_kind(qs_kind, basis_Set=ri_xas_basis, basis_type="RI_XAS")
             IF (.NOT. ASSOCIATED(ri_xas_basis)) THEN
-               CALL cp_warn(__LOCATION__, "Automatic Generation of RI_XAS basis. "// &
-                            "This is experimental code.")
                ! Generate a default basis
                CALL create_ri_aux_basis_set(ri_xas_basis, qs_kind, dft_control%auto_basis_ri_xas)
                CALL add_basis_set_to_container(qs_kind%basis_sets, ri_xas_basis, "RI_XAS")
@@ -1658,6 +1653,11 @@ CONTAINS
 
          ! Print the Quickstep control parameters
          CALL write_qs_control(dft_control%qs_control, dft_section)
+
+         ! Print the ADMM control parameters
+         IF (dft_control%do_admm) THEN
+            CALL write_admm_control(dft_control%admm_control, dft_section)
+         END IF
 
          ! Print XES/XAS control parameters
          IF (dft_control%do_xas_calculation) THEN

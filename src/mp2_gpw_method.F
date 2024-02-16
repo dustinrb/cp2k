@@ -1,6 +1,6 @@
 !--------------------------------------------------------------------------------------------------!
 !   CP2K: A general program to perform molecular dynamics simulations                              !
-!   Copyright 2000-2023 CP2K developers group <https://cp2k.org>                                   !
+!   Copyright 2000-2024 CP2K developers group <https://cp2k.org>                                   !
 !                                                                                                  !
 !   SPDX-License-Identifier: GPL-2.0-or-later                                                      !
 !--------------------------------------------------------------------------------------------------!
@@ -46,12 +46,9 @@ MODULE mp2_gpw_method
                                               pw_transfer,&
                                               pw_zero
    USE pw_poisson_types,                ONLY: pw_poisson_type
-   USE pw_pool_types,                   ONLY: pw_pool_create_pw,&
-                                              pw_pool_type
-   USE pw_types,                        ONLY: REALDATA3D,&
-                                              REALSPACE,&
-                                              pw_release,&
-                                              pw_type
+   USE pw_pool_types,                   ONLY: pw_pool_type
+   USE pw_types,                        ONLY: pw_c1d_gs_type,&
+                                              pw_r3d_rs_type
    USE qs_collocate_density,            ONLY: calculate_wavefunction
    USE qs_environment_types,            ONLY: qs_environment_type
    USE qs_integrate_potential,          ONLY: integrate_v_rspace
@@ -158,11 +155,12 @@ CONTAINS
       TYPE(dft_control_type), POINTER                    :: dft_control
       TYPE(group_dist_d1_type)                           :: gd_exchange
       TYPE(mp_comm_type)                                 :: comm_exchange
+      TYPE(pw_c1d_gs_type)                               :: pot_g, rho_g
       TYPE(pw_env_type), POINTER                         :: pw_env_sub
       TYPE(pw_poisson_type), POINTER                     :: poisson_env
       TYPE(pw_pool_type), POINTER                        :: auxbas_pw_pool
-      TYPE(pw_type)                                      :: pot_g, psi_a, rho_g, rho_r
-      TYPE(pw_type), ALLOCATABLE, DIMENSION(:)           :: psi_i
+      TYPE(pw_r3d_rs_type)                               :: psi_a, rho_r
+      TYPE(pw_r3d_rs_type), ALLOCATABLE, DIMENSION(:)    :: psi_i
       TYPE(task_list_type), POINTER                      :: task_list_sub
 
       CALL timeset(routineN, handle)
@@ -221,7 +219,7 @@ CONTAINS
       CALL prepare_gpw(qs_env, dft_control, e_cutoff_old, cutoff_old, relative_cutoff_old, para_env_sub, pw_env_sub, &
                        auxbas_pw_pool, poisson_env, task_list_sub, rho_r, rho_g, pot_g, psi_a, sab_orb_sub)
 
-      wfn_size = REAL(SIZE(rho_r%cr3d), KIND=dp)
+      wfn_size = REAL(SIZE(rho_r%array), KIND=dp)
       CALL para_env%max(wfn_size)
 
       ngroup = para_env%num_pe/para_env_sub%num_pe
@@ -362,9 +360,7 @@ CONTAINS
 
       ALLOCATE (psi_i(my_I_occupied_start:my_I_occupied_end))
       DO i = my_I_occupied_start, my_I_occupied_end
-         CALL pw_pool_create_pw(auxbas_pw_pool, psi_i(i), &
-                                use_data=REALDATA3D, &
-                                in_space=REALSPACE)
+         CALL auxbas_pw_pool%create_pw(psi_i(i))
          CALL calculate_wavefunction(mo_coeff, i, psi_i(i), rho_g, atomic_kind_set, &
                                      qs_kind_set, cell, dft_control, particle_set, &
                                      pw_env_sub, external_vector=my_Cocc(:, i - my_I_occupied_start + 1))
@@ -545,7 +541,7 @@ CONTAINS
       END DO
 
       DO i = my_I_occupied_start, my_I_occupied_end
-         CALL pw_release(psi_i(i))
+         CALL psi_i(i)%release()
       END DO
       DEALLOCATE (psi_i)
 

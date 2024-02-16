@@ -1,6 +1,6 @@
 !--------------------------------------------------------------------------------------------------!
 !   CP2K: A general program to perform molecular dynamics simulations                              !
-!   Copyright 2000-2023 CP2K developers group <https://cp2k.org>                                   !
+!   Copyright 2000-2024 CP2K developers group <https://cp2k.org>                                   !
 !                                                                                                  !
 !   SPDX-License-Identifier: GPL-2.0-or-later                                                      !
 !--------------------------------------------------------------------------------------------------!
@@ -51,8 +51,7 @@ MODULE rpa_rse
    USE message_passing,                 ONLY: mp_para_env_type
    USE mp2_types,                       ONLY: mp2_type
    USE parallel_gemm_api,               ONLY: parallel_gemm
-   USE pw_types,                        ONLY: pw_release,&
-                                              pw_type
+   USE pw_types,                        ONLY: pw_r3d_rs_type
    USE qs_energy_types,                 ONLY: qs_energy_type
    USE qs_environment_types,            ONLY: get_qs_env,&
                                               qs_environment_type
@@ -426,7 +425,7 @@ CONTAINS
       INTEGER                                            :: handle, i
       REAL(KIND=dp)                                      :: exc
       TYPE(dbcsr_p_type), DIMENSION(:), POINTER          :: matrix_vxc
-      TYPE(pw_type), DIMENSION(:), POINTER               :: tau_rspace, v_rspace
+      TYPE(pw_r3d_rs_type), DIMENSION(:), POINTER        :: tau_rspace, v_rspace
       TYPE(qs_ks_env_type), POINTER                      :: ks_env
       TYPE(qs_rho_type), POINTER                         :: rho
       TYPE(section_vals_type), POINTER                   :: input, xc_section
@@ -446,7 +445,7 @@ CONTAINS
          CALL compute_matrix_vxc(qs_env=qs_env, v_rspace=v_rspace, matrix_vxc=matrix_vxc)
 
          DO i = 1, SIZE(v_rspace)
-            CALL pw_release(v_rspace(i))
+            CALL v_rspace(i)%release()
          END DO
          DEALLOCATE (v_rspace)
 

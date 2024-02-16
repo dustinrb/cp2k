@@ -10,8 +10,7 @@ import sys
 from datetime import datetime, timezone
 from functools import lru_cache
 import itertools
-from typing import Tuple, List, TypeVar
-from collections.abc import Iterable
+from typing import Tuple, List, TypeVar, Iterable
 
 T = TypeVar("T")
 
@@ -30,6 +29,7 @@ FLAG_EXCEPTIONS = (
     r"LIBINT_CONTRACTED_INTS",
     r"XC_MAJOR_VERSION",
     r"XC_MINOR_VERSION",
+    r"NDEBUG",
     r"OMP_DEFAULT_NONE_WITH_OOP",
     r"_OPENMP",
     r"__COMPILE_ARCH",
@@ -122,15 +122,22 @@ BSD_DIRECTORIES = ("src/offload/", "src/grid/", "src/dbm/")
 
 @lru_cache(maxsize=None)
 def get_install_txt() -> str:
-    return CP2K_DIR.joinpath("INSTALL.md").read_text()
+    return CP2K_DIR.joinpath("INSTALL.md").read_text(encoding="utf8")
 
 
 @lru_cache(maxsize=None)
 def get_flags_src() -> str:
-    cp2k_info = CP2K_DIR.joinpath("src/cp2k_info.F").read_text()
+    cp2k_info = CP2K_DIR.joinpath("src/cp2k_info.F").read_text(encoding="utf8")
     match = CP2K_FLAGS_RE.search(cp2k_info)
     assert match
     return match.group(1)
+
+
+@lru_cache(maxsize=None)
+def get_bibliography_dois() -> List[str]:
+    bib = CP2K_DIR.joinpath("src/common/bibliography.F").read_text(encoding="utf8")
+    matches = re.findall(r'DOI="([^"]+)"', bib, flags=re.IGNORECASE)
+    return [doi for doi in matches if "/" in doi]  # filter invalid DOIs.
 
 
 def check_file(path: pathlib.Path) -> List[str]:
@@ -239,6 +246,13 @@ def check_file(path: pathlib.Path) -> List[str]:
             warnings += [f"{path}: Flag '{flag}' not mentioned in INSTALL.md"]
         if flag not in get_flags_src():
             warnings += [f"{path}: Flag '{flag}' not mentioned in cp2k_flags()"]
+
+    # Check for DOIs that could be a bibliography reference.
+    if re.match(r"docs/[^/]+/.*\.md", str(path)) and "docs/CP2K_INPUT" not in str(path):
+        for line in content.splitlines():
+            for doi in get_bibliography_dois():
+                if doi.lower() in line:
+                    warnings += [f"{path}: Please replace doi:{doi} with biblio ref."]
 
     return warnings
 
