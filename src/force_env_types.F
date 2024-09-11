@@ -31,7 +31,7 @@ MODULE force_env_types
                                               cp_fm_release,&
                                               cp_fm_type
 
-   USE dbcsr_api,                       ONLY: dbcsr_p_type
+   USE cp_dbcsr_api,                    ONLY: dbcsr_p_type
    USE cp_dbcsr_operations,             ONLY: copy_dbcsr_to_fm
 
    USE eip_environment_types,           ONLY: eip_env_get,&
@@ -380,9 +380,9 @@ CONTAINS
       TYPE(nnp_type), OPTIONAL, POINTER                  :: nnp_env
       TYPE(embed_env_type), OPTIONAL, POINTER            :: embed_env
       TYPE(ipi_environment_type), OPTIONAL, POINTER      :: ipi_env
+      REAL(KIND=dp), OPTIONAL, DIMENSION(:,:), INTENT(OUT) :: ks_mos, overlap, fock, Vxc
 
       REAL(KIND=dp)                                      :: eip_kinetic_energy, eip_potential_energy
-      REAL(KIND=dp), OPTIONAL, DIMENSION(:,:), INTENT(OUT) :: ks_mos, overlap, fock, Vxc
       TYPE(dbcsr_p_type), DIMENSION(:), POINTER          :: matrix_s, matrix_ks!, matrix_vxc
       TYPE(cp_subsys_type), POINTER                      :: subsys_tmp
       TYPE(fist_energy_type), POINTER                    :: thermo
