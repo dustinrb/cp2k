@@ -311,6 +311,19 @@ void cp2k_transport_set_callback(force_env_t force_env,
                                  ext_method_callback_f_ptr func);
 
 /*******************************************************************************
+ * \brief Get the cp2k matrices
+ * \param force_env the force environment
+ * \param mos MO coefficients
+ * \param fock Fock matrix
+ * \param overlap Overlap matrix
+ * \param Vxc Exchange correlation 
+ * \param nao Atomic orbitals
+ * \param nmo Molecular orbitals
+ * TODO: Split this method into sub methods. No need to return all this information all the time
+ *******************************************************************************/
+void cp2k_get_matrices(force_env_t force_env, double* mos, double* fock, double* overlap, double* Vxc,  int nao, int nmo);
+
+/*******************************************************************************
  * \brief Get the number of molecular orbitals in the active space
  * \param force_env the force environment
  * \returns The number of elements or -1 if unavailable

@@ -16,6 +16,7 @@
 !> \author CJM & JGH
 ! **************************************************************************************************
 MODULE force_env_types
+   USE cp_blacs_env,                    ONLY: cp_blacs_env_type
    USE cell_types,                      ONLY: cell_type
    USE cp_log_handling,                 ONLY: cp_add_default_logger,&
                                               cp_logger_type,&
@@ -23,6 +24,16 @@ MODULE force_env_types
    USE cp_subsys_types,                 ONLY: cp_subsys_get,&
                                               cp_subsys_type,&
                                               pack_subsys_particles
+   USE cp_fm_struct,                    ONLY: cp_fm_struct_create,&
+                                              cp_fm_struct_release,&
+                                              cp_fm_struct_type
+   USE cp_fm_types,                     ONLY: cp_fm_create,&
+                                              cp_fm_release,&
+                                              cp_fm_type
+
+   USE dbcsr_api,                       ONLY: dbcsr_p_type
+   USE cp_dbcsr_operations,             ONLY: copy_dbcsr_to_fm
+
    USE eip_environment_types,           ONLY: eip_env_get,&
                                               eip_env_release,&
                                               eip_environment_type
@@ -72,6 +83,8 @@ MODULE force_env_types
    USE qs_environment_types,            ONLY: get_qs_env,&
                                               qs_env_release,&
                                               qs_environment_type
+   USE qs_mo_types,                     ONLY: get_mo_set,&
+                                              mo_set_type
 #include "./base/base_uses.f90"
 
    IMPLICIT NONE
@@ -338,11 +351,13 @@ CONTAINS
                                       meta_env, fp_env, subsys, para_env, potential_energy, additional_potential, &
                                       kinetic_energy, harmonic_shell, kinetic_shell, cell, sub_force_env, &
                                       qmmm_env, qmmmx_env, eip_env, pwdft_env, globenv, input, force_env_section, &
-                                      method_name_id, root_section, mixed_env, nnp_env, embed_env, ipi_env)
+                                      method_name_id, root_section, mixed_env, nnp_env, embed_env, ipi_env, ks_mos, overlap, &
+                                      fock, Vxc)
       TYPE(force_env_type), INTENT(IN)                   :: force_env
       INTEGER, INTENT(out), OPTIONAL                     :: in_use
       TYPE(fist_environment_type), OPTIONAL, POINTER     :: fist_env
       TYPE(qs_environment_type), OPTIONAL, POINTER       :: qs_env
+      TYPE(mo_set_type), DIMENSION(:), POINTER           :: mos
       TYPE(meta_env_type), OPTIONAL, POINTER             :: meta_env
       TYPE(fp_type), OPTIONAL, POINTER                   :: fp_env
       TYPE(cp_subsys_type), OPTIONAL, POINTER            :: subsys
@@ -367,13 +382,21 @@ CONTAINS
       TYPE(ipi_environment_type), OPTIONAL, POINTER      :: ipi_env
 
       REAL(KIND=dp)                                      :: eip_kinetic_energy, eip_potential_energy
+      REAL(KIND=dp), OPTIONAL, DIMENSION(:,:), INTENT(OUT) :: ks_mos, overlap, fock, Vxc
+      TYPE(dbcsr_p_type), DIMENSION(:), POINTER          :: matrix_s, matrix_ks!, matrix_vxc
       TYPE(cp_subsys_type), POINTER                      :: subsys_tmp
       TYPE(fist_energy_type), POINTER                    :: thermo
       TYPE(mixed_energy_type), POINTER                   :: mixed_energy
       TYPE(pwdft_energy_type), POINTER                   :: pwdft_energy
       TYPE(qs_energy_type), POINTER                      :: qs_energy
+      TYPE(cp_fm_type), POINTER                          :: mo_coeff, s_fm, fock_fm 
+      TYPE(cp_fm_struct_type), POINTER                   :: ao_ao_fmstruct
+      TYPE(cp_blacs_env_type), POINTER                   :: blacs_env
+      INTEGER                                            :: ispin, nmo, nao!, mu,nu
 
       NULLIFY (subsys_tmp)
+      NULLIFY (ao_ao_fmstruct, blacs_env)
+      NULLIFY (mo_coeff, s_fm, fock_fm)
 
       CPASSERT(force_env%ref_count > 0)
 
@@ -384,10 +407,68 @@ CONTAINS
          CPASSERT(.NOT. PRESENT(eip_env))
          CPASSERT(.NOT. PRESENT(pwdft_env))
          CPASSERT(.NOT. PRESENT(ipi_env))
+         IF(PRESENT(ks_mos).and.PRESENT(overlap).and.PRESENT(fock).and.PRESENT(Vxc)) THEN
+         NULLIFY (mos)
+         CALL get_qs_env(force_env%qs_env, &
+                         energy=qs_energy, &
+                         input=input, &
+                         cp_subsys=subsys, &
+                         mos=mos, &
+                         matrix_s=matrix_s, &
+                         matrix_ks=matrix_ks, &
+                         !matrix_vxc=matrix_vxc, &
+                         blacs_env=blacs_env)
+            DO ispin=1,SIZE(mos)
+                CALL get_mo_set(mos(ispin), nmo=nmo, nao=nao, mo_coeff=mo_coeff)
+            ENDDO
+         ! create matrix structures using mo_coeff as template
+         CALL cp_fm_struct_create(ao_ao_fmstruct, context=blacs_env, &
+                                  nrow_global=nao, ncol_global=nao)
+         allocate (s_fm)
+         CALL cp_fm_create(s_fm, ao_ao_fmstruct) 
+         ! copy the sparse matrices to dense ones
+         CALL copy_dbcsr_to_fm(matrix_s(1)%matrix, s_fm)
+         overlap = s_fm%local_data
+!            do mu=1,nao
+!               do nu=1,nao
+!                  write(*,*) mu,nu,overlap(mu,nu)
+!               ENDDO
+!            enddo
+         CALL cp_fm_release(s_fm)
+         deallocate(s_fm)
+
+!         CALL copy_dbcsr_to_fm(matrix_vxc(1)%matrix, vxc_fm)
+         ! copy matrices to arrays
+         allocate (fock_fm) 
+         CALL cp_fm_create(fock_fm, ao_ao_fmstruct) 
+         CALL copy_dbcsr_to_fm(matrix_ks(1)%matrix, fock_fm)
+         fock = fock_fm%local_data
+!            do mu=1,nao
+!               do nu=1,nao
+!                  write(*,*) mu,nu,fock(mu,nu)
+!               ENDDO
+!            enddo
+         CALL cp_fm_release(fock_fm)
+         deallocate(fock_fm)
+!         CALL cp_fm_create(vxc_fm, matrix_struct=ao_ao_fmstruct, &
+!                           name="vxc_fm")
+!            Vxc = vxc_fm%local_data
+         ks_mos = mo_coeff%local_data
+!         do mu=1, nao
+!            do nu=1,nao
+!               write(*,*) mu,nu,ks_mos(mu,nu)
+!            enddo
+!         enddo
+         ! release from memory
+!         CALL cp_fm_release(matrix_vxc)
+         CALL cp_fm_struct_release(ao_ao_fmstruct)
+         CALL cp_fm_release(mo_coeff)
+         ELSE   
          CALL get_qs_env(force_env%qs_env, &
                          energy=qs_energy, &
                          input=input, &
                          cp_subsys=subsys)
+         ENDIF
          IF (PRESENT(potential_energy)) potential_energy = qs_energy%total
          CPASSERT(.NOT. PRESENT(kinetic_energy))
       CASE (use_fist_force)

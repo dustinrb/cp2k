@@ -174,7 +174,7 @@ MODULE f77_interface
    PUBLIC :: default_para_env
    PUBLIC :: init_cp2k, finalize_cp2k
    PUBLIC :: create_force_env, destroy_force_env, set_pos, get_pos, &
-             get_force, calc_energy_force, get_energy, get_stress_tensor, &
+             get_force, calc_energy_force, get_mats, get_energy, get_stress_tensor, &
              calc_energy, calc_force, check_input, get_natom, get_nparticle, &
              f_env_add_defaults, f_env_rm_defaults, f_env_type, &
              f_env_get_from_id, &
@@ -1356,6 +1356,22 @@ CONTAINS
       CALL f_env_rm_defaults(f_env, ierr)
 
    END SUBROUTINE calc_energy_force
+
+   SUBROUTINE get_mats(env_id, ks_mos, fock, overlap, Vxc, nao, nmo, ierr)
+
+      INTEGER, INTENT(in)                             :: env_id, nao, nmo
+      REAL(kind=dp), DIMENSION(nao,nmo)               :: ks_mos
+      REAL(kind=dp), DIMENSION(nao,nao)               :: fock, overlap, Vxc
+      INTEGER, INTENT(out)                            :: ierr
+
+      TYPE(f_env_type), POINTER                       :: f_env
+
+      NULLIFY(f_env)
+      CALL f_env_add_defaults(env_id, f_env)
+      CALL force_env_get(f_env%force_env, ks_mos=ks_mos, overlap=overlap, fock=fock, Vxc=Vxc)
+      CALL f_env_rm_defaults(f_env, ierr)
+
+   END SUBROUTINE get_mats
 
 ! **************************************************************************************************
 !> \brief returns the energy of the last configuration calculated
